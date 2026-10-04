@@ -58,12 +58,66 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
   const [inputMessage, setInputMessage] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isPTTActive, setIsPTTActive] = useState(false);
   const [internalCoreState, setInternalCoreState] = useState<'IDLE' | 'LISTENING' | 'UNDERSTANDING' | 'THINKING' | 'PLANNING' | 'EXECUTING' | 'VERIFYING' | 'SPEAKING' | 'SUCCESS' | 'WARNING' | 'ERROR'>('IDLE');
   const [internalSubState, setInternalSubState] = useState<'ANALYZE' | 'PLAN' | 'EXECUTE' | 'VERIFY'>('ANALYZE');
   const [internalStatusText, setInternalStatusText] = useState('Ready for your command.');
   const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  const startPTT = async () => {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const resStr = reader.result as string;
+          const base64 = resStr?.includes(',') ? resStr.split(',')[1] : resStr;
+          if (base64) {
+            setInternalCoreState('UNDERSTANDING');
+            setInternalStatusText('Transcribing speech...');
+            try {
+              const res = await MayaApi.sendPttAudio(base64);
+              if (res.success && res.transcript) {
+                handleSend(res.transcript);
+              } else {
+                setInternalCoreState('IDLE');
+                setInternalStatusText('No speech detected.');
+              }
+            } catch (err) {
+              setInternalCoreState('IDLE');
+            }
+          }
+        };
+        reader.readAsDataURL(blob);
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsPTTActive(true);
+      setInternalCoreState('LISTENING');
+      setInternalStatusText('Listening... (release to send)');
+    } catch (err) {
+      console.warn('Microphone access denied or unavailable', err);
+    }
+  };
+
+  const stopPTT = () => {
+    if (mediaRecorderRef.current && isPTTActive) {
+      mediaRecorderRef.current.stop();
+      setIsPTTActive(false);
+    }
+  };
 
   // Sync external props if provided
   const activeCoreState = externalCoreState || internalCoreState;
@@ -407,8 +461,19 @@ export const ChatStage: React.FC<ChatStageProps> = ({
             className="flex-1 bg-transparent border-none outline-none text-slate-100 placeholder-slate-400 text-sm font-normal"
           />
 
-          {/* Microphone */}
-          <button className="text-slate-400 hover:text-cyan-400 transition-colors mx-2 p-1 cursor-pointer">
+          {/* Microphone Push-to-Talk */}
+          <button
+            onMouseDown={startPTT}
+            onMouseUp={stopPTT}
+            onTouchStart={startPTT}
+            onTouchEnd={stopPTT}
+            title="Push to talk (Hold to speak)"
+            className={`transition-all duration-200 mx-2 p-1.5 rounded-full cursor-pointer ${
+              isPTTActive
+                ? 'bg-cyan-500/20 text-cyan-300 shadow-[0_0_15px_#22d3ee] scale-110'
+                : 'text-slate-400 hover:text-cyan-400'
+            }`}
+          >
             <Mic size={18} />
           </button>
 

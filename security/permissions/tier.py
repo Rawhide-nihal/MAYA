@@ -42,23 +42,25 @@ class PendingConfirmation:
     timestamp: float = field(default_factory=time.time)
     status: str = "pending"  # pending, approved, rejected, expired
 
-# Default tool mapping to permission levels
+# Default tool mapping to permission levels (covers all 34 canonical tools)
 TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     # Observation (Level 1)
     "get_system_status": PermissionLevel.LEVEL_1_OBSERVATION,
     "run_system_diagnostics": PermissionLevel.LEVEL_1_OBSERVATION,
+    "inspect_project": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_files": PermissionLevel.LEVEL_1_OBSERVATION,
+    "read_file": PermissionLevel.LEVEL_1_OBSERVATION,
+    "list_directory": PermissionLevel.LEVEL_1_OBSERVATION,
+    "list_windows": PermissionLevel.LEVEL_1_OBSERVATION,
+    "list_processes": PermissionLevel.LEVEL_1_OBSERVATION,
+    "get_recent_actions": PermissionLevel.LEVEL_1_OBSERVATION,
+    "search_memory": PermissionLevel.LEVEL_1_OBSERVATION,
+    "capture_screen": PermissionLevel.LEVEL_1_OBSERVATION,
+    "analyze_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_file_content": PermissionLevel.LEVEL_1_OBSERVATION,
     "find_largest_files": PermissionLevel.LEVEL_1_OBSERVATION,
     "find_duplicates": PermissionLevel.LEVEL_1_OBSERVATION,
-    "read_file": PermissionLevel.LEVEL_1_OBSERVATION,
-    "list_directory": PermissionLevel.LEVEL_1_OBSERVATION,
-    "list_processes": PermissionLevel.LEVEL_1_OBSERVATION,
     "get_active_window": PermissionLevel.LEVEL_1_OBSERVATION,
-    "capture_screen": PermissionLevel.LEVEL_1_OBSERVATION,
-    "analyze_screen": PermissionLevel.LEVEL_1_OBSERVATION,
-    "get_recent_actions": PermissionLevel.LEVEL_1_OBSERVATION,
-    "inspect_project": PermissionLevel.LEVEL_1_OBSERVATION,
     "check_git_status": PermissionLevel.LEVEL_1_OBSERVATION,
     "get_git_diff": PermissionLevel.LEVEL_1_OBSERVATION,
     "get_memory": PermissionLevel.LEVEL_1_OBSERVATION,
@@ -71,27 +73,36 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
 
     # Safe actions (Level 2)
     "open_application": PermissionLevel.LEVEL_2_SAFE_ACTION,
-    "open_url": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "open_application_and_inspect": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "focus_window": PermissionLevel.LEVEL_2_SAFE_ACTION,
-    "create_directory": PermissionLevel.LEVEL_2_SAFE_ACTION,
-    "run_safe_command": PermissionLevel.LEVEL_2_SAFE_ACTION,
-    "build_project": PermissionLevel.LEVEL_2_SAFE_ACTION,
-    "run_tests": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "minimize_window": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "maximize_window": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "restore_window": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "set_volume": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "open_url": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "start_timer": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "set_reminder": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "store_memory": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "forget_memory": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "rollback_last_action": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "create_directory": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "run_safe_command": PermissionLevel.LEVEL_2_SAFE_ACTION,
 
     # Modification (Level 3)
     "write_file": PermissionLevel.LEVEL_3_MODIFICATION,
+    "copy_file": PermissionLevel.LEVEL_3_MODIFICATION,
     "move_file": PermissionLevel.LEVEL_3_MODIFICATION,
     "apply_patch": PermissionLevel.LEVEL_3_MODIFICATION,
-    "copy_file": PermissionLevel.LEVEL_3_MODIFICATION,
-    "terminate_process": PermissionLevel.LEVEL_3_MODIFICATION,
+    "run_build": PermissionLevel.LEVEL_3_MODIFICATION,
+    "build_project": PermissionLevel.LEVEL_3_MODIFICATION,
+    "run_tests": PermissionLevel.LEVEL_3_MODIFICATION,
+    "close_application": PermissionLevel.LEVEL_3_MODIFICATION,
     "clean_temp_files": PermissionLevel.LEVEL_3_MODIFICATION,
     "execute_terminal_command": PermissionLevel.LEVEL_3_MODIFICATION,
 
     # Critical (Level 4)
     "delete_file": PermissionLevel.LEVEL_4_CRITICAL,
+    "terminate_process": PermissionLevel.LEVEL_4_CRITICAL,
     "modify_system_setting": PermissionLevel.LEVEL_4_CRITICAL,
     "modify_security": PermissionLevel.LEVEL_4_CRITICAL,
     "modify_registry": PermissionLevel.LEVEL_4_CRITICAL,

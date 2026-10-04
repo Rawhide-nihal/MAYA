@@ -11,6 +11,7 @@ import time
 import queue
 import threading
 import hmac
+import base64
 from urllib.parse import urlparse
 from pathlib import Path
 from flask import Flask, request, jsonify, Response
@@ -35,11 +36,12 @@ from maya_core.context.builder import ContextBuilder
 from maya_core.planner.dynamic_planner import DynamicTaskPlanner
 from maya_core.brain.brain import MayaBrain
 from skills.registry import SkillsRegistry
-from voice.engine import VoiceEngine
+from voice.engine import VoiceEngine, calculate_pcm_rms
 from maya_core.events import (
     MAYA_STATE_CHANGED,
     PERMISSION_RESOLVED,
     ACTION_ROLLED_BACK,
+    VOICE_LISTENING_AMPLITUDE,
 )
 
 app = Flask(__name__)
@@ -240,6 +242,22 @@ def cancel_task():
     cancelled = planner.cancel_plan(plan_id) if plan_id else True
     dispatch_event(MAYA_STATE_CHANGED, {"state": "IDLE"})
     return jsonify({"success": True, "cancelled": cancelled})
+
+# Voice Push-To-Talk
+@app.route("/api/voice/ptt", methods=["POST"])
+def voice_ptt():
+    data = request.get_json(silent=True) or {}
+    audio_b64 = data.get("audio_base64", "")
+    if not audio_b64:
+        return jsonify({"success": False, "error": "Missing audio_base64"}), 400
+    try:
+        pcm_bytes = base64.b64decode(audio_b64)
+        amp = calculate_pcm_rms(pcm_bytes[:2048])
+        dispatch_event(VOICE_LISTENING_AMPLITUDE, {"amplitude": amp})
+        res = voice.process_ptt_audio(pcm_bytes)
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # 9. Action Ledger Activity
 @app.route("/api/activity", methods=["GET"])

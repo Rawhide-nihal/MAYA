@@ -36,6 +36,9 @@ from maya_core.events import (
     MAYA_STATE_CHANGED,
 )
 
+from voice.stt.provider import SpeechRecognitionProvider
+from voice.wakeword.detector import WakeWordDetector
+
 def calculate_pcm_rms(pcm_bytes: bytes) -> float:
     """Calculates true Root Mean Square (RMS) amplitude from 16-bit PCM audio buffer."""
     if not pcm_bytes:
@@ -53,6 +56,8 @@ class VoiceEngine:
         self.event_emitter = event_emitter
         self.tts_engine = None
         self._init_tts()
+        self.stt_provider = SpeechRecognitionProvider()
+        self.wakeword_detector = WakeWordDetector()
         self.is_speaking = False
         self.is_listening = False
         self._stop_requested = False
@@ -196,12 +201,14 @@ class VoiceEngine:
                         amp = calculate_pcm_rms(raw_data[:2048])
                         self.emit(VOICE_LISTENING_AMPLITUDE, {"amplitude": amp})
 
-                        # Transcribe speech
-                        transcript = recognizer.recognize_google(audio)
-                        if transcript:
-                            handled = self.process_voice_transcript(transcript)
-                            if handled != "interrupted" and on_text_detected:
-                                on_text_detected(transcript)
+                        res = self.stt_provider.transcribe_audio_data(audio)
+                        if res.get("success"):
+                            transcript = res.get("transcript", "")
+                            should_process, command = self.wakeword_detector.process_utterance(transcript, already_listening=self.is_listening)
+                            if should_process and command:
+                                handled = self.process_voice_transcript(command)
+                                if handled != "interrupted" and on_text_detected:
+                                    on_text_detected(command)
                     except sr.WaitTimeoutError:
                         continue
                     except sr.UnknownValueError:
@@ -226,3 +233,17 @@ class VoiceEngine:
             self.stop_speaking()
             return "interrupted"
         return transcript
+
+    def process_ptt_audio(self, pcm_bytes: bytes, on_text_detected: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+        """Processes push-to-talk audio recorded from the frontend."""
+        if not sr or not self.stt_provider:
+            return {"success": False, "error": "STT unavailable"}
+        try:
+            audio_data = sr.AudioData(pcm_bytes, 16000, 2)
+            res = self.stt_provider.transcribe_audio_data(audio_data)
+            if res.get("success") and on_text_detected:
+                transcript = res.get("transcript", "")
+                on_text_detected(transcript)
+            return res
+        except Exception as e:
+            return {"success": False, "error": str(e)}

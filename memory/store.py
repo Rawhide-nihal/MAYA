@@ -12,11 +12,13 @@ from typing import List, Dict, Any, Optional
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from maya_core.config import MEMORY_DB_PATH, PROJECT_ROOT
+from memory.embeddings.provider import MemoryEmbeddingProvider
 
 class MemoryStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path) if db_path else MEMORY_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.embedding_provider = MemoryEmbeddingProvider()
         self._init_db()
 
     def _init_db(self):
@@ -235,30 +237,28 @@ class MemoryStore:
             conn.close()
 
     def search_relevant_memories(self, query: str, top_k: int = 3) -> List[str]:
-        """TF-IDF Cosine Similarity semantic retrieval over active memories."""
+        """Vector cosine similarity and recency-weighted retrieval over active memories."""
         all_mems = self.get_all_memories()
-        documents = []
+        candidates = []
         for s in all_mems["semantic"]:
-            documents.append(f"{s['category']} {s['key']}: {s['content']}")
+            candidates.append(s)
         for e in all_mems["episodic"]:
-            documents.append(f"Event: {e['content']}")
+            candidates.append({"content": f"Event: {e['content']}", "timestamp": e.get("timestamp"), "importance": e.get("importance", 1.0)})
 
-        if not documents:
+        if not candidates:
             return []
 
-        try:
-            vec = TfidfVectorizer().fit(documents + [query])
-            doc_vecs = vec.transform(documents)
-            query_vec = vec.transform([query])
-            sims = cosine_similarity(query_vec, doc_vecs).flatten()
-            ranked_indices = sims.argsort()[::-1]
-            results = []
-            for idx in ranked_indices[:top_k]:
-                if sims[idx] > 0.1:
-                    results.append(documents[idx])
-            return results
-        except Exception:
-            return documents[:top_k]
+        ranked = self.embedding_provider.rank_memories(query, candidates, top_k=top_k)
+        results = []
+        for item, score in ranked:
+            content = item.get("content", "")
+            cat = item.get("category")
+            key = item.get("key")
+            if cat and key:
+                results.append(f"{cat} {key}: {content}")
+            else:
+                results.append(content)
+        return results if results else [c.get("content", "") for c in candidates[:top_k]]
 
     def update_project(self, name: str, path: str, language: str, build_system: str, branch: str = "main", issues: str = "None") -> None:
         conn = sqlite3.connect(str(self.db_path))

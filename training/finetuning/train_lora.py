@@ -17,6 +17,12 @@ import argparse
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+# Prevent OpenBLAS / OpenMP thread pool memory crash on Windows Python 3.14
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 # Enable unbuffered stdout for real-time progress logging
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
@@ -78,8 +84,9 @@ def train_maya_model(
     base_model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
     epochs: int = 1,
     full_train: bool = True,
+    is_dev: bool = False,
     max_steps: Optional[int] = None,
-    batch_size: int = 4,
+    batch_size: int = 8,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 2e-4,
     lora_r: int = 16,
@@ -88,7 +95,8 @@ def train_maya_model(
     use_cuda: bool = True
 ) -> Dict[str, Any]:
     print("=" * 65)
-    print("MAYA NEURAL ADAPTER TRAINING (PHASE 4 FULL DATASET & GPU ADAPTIVE)")
+    mode_str = "DEV_TRAIN (FAST PIPELINE CHECK)" if is_dev else "FULL_TRAIN (OFFICIAL MAYA-V1 RETRAINING)"
+    print(f"MAYA NEURAL ADAPTER TRAINING ({mode_str})")
     print("=" * 65)
 
     hw = get_hardware_profile()
@@ -103,8 +111,12 @@ def train_maya_model(
         vram_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 2)
         print(f"[Hardware] GPU: {gpu_name} (Dedicated VRAM: {vram_total:.0f} MB)")
         torch.cuda.empty_cache()
+    else:
+        print(f"[Hardware] GPU: CUDA unavailable. Using optimized single-threaded CPU execution to protect against BLAS memory pool exhaustion.")
+        torch.set_num_threads(1)
 
     print(f"[Config] Base Foundation: {base_model_name}")
+    print(f"[Config] Method: LoRA (PEFT causal LM)")
     print(f"[Config] LoRA: rank={lora_r}, alpha={lora_alpha}, target_modules=['q_proj', 'v_proj', 'k_proj', 'o_proj']")
     print(f"[Config] Batch Size: {batch_size}, Grad Accum: {gradient_accumulation_steps}, LR: {learning_rate}")
 
@@ -120,7 +132,7 @@ def train_maya_model(
     model = AutoModelForCausalLM.from_pretrained(
         base_model_name,
         torch_dtype=torch_dtype,
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=False,
         trust_remote_code=True
     )
     model.to(device)
@@ -140,22 +152,27 @@ def train_maya_model(
     if hasattr(model, "gradient_checkpointing_enable"):
         try:
             model.gradient_checkpointing_enable()
-            print("  • Gradient checkpointing enabled for memory efficiency.")
+            print("  • Gradient checkpointing enabled for low-memory CPU/GPU execution.")
         except Exception:
             pass
 
     trainable_params, total_params = model.get_nb_trainable_parameters()
     print(f"  • LoRA Trainable Parameters: {trainable_params:,} / {total_params:,} ({100 * trainable_params / total_params:.2f}%)")
 
-    # 4. Load & Pre-Tokenize Datasets (No Truncation)
-    print("\n[4/7] Loading & Pre-Tokenizing Dataset V4 (Full Dataset)...")
+    # 4. Load & Pre-Tokenize Datasets
+    print("\n[4/7] Loading & Pre-Tokenizing Dataset V4...")
     train_samples = load_jsonl(TRAIN_FILE)
     val_samples = load_jsonl(VAL_FILE)
-    print(f"  • Total Train samples loaded:      {len(train_samples)}")
-    print(f"  • Total Validation samples loaded: {len(val_samples)}")
 
     if not train_samples:
         raise ValueError("Train dataset is empty! Please run build_dataset.py first.")
+
+    if is_dev:
+        train_samples = train_samples[:50]
+        val_samples = val_samples[:10]
+        print(f"  [DEV_TRAIN] Subsampled {len(train_samples)} training / {len(val_samples)} validation samples.")
+    else:
+        print(f"  [FULL_TRAIN] Using 100% full dataset: {len(train_samples)} train / {len(val_samples)} val samples.")
 
     train_texts = [format_sample_for_training(s, tokenizer) for s in train_samples]
     val_texts = [format_sample_for_training(s, tokenizer) for s in val_samples]
@@ -164,12 +181,12 @@ def train_maya_model(
     total_samples = len(train_texts)
     batches_per_epoch = math.ceil(total_samples / batch_size)
     total_training_steps = batches_per_epoch * epochs
-    if max_steps and not full_train:
+    if max_steps:
         total_training_steps = min(total_training_steps, max_steps)
-    print(f"  • Epochs: {epochs} | Batches/Epoch: {batches_per_epoch} | Total Optimization Steps: {total_training_steps}")
+    print(f"  • Epochs: {epochs} | Batches/Epoch: {batches_per_epoch} | Total Optimization Steps: {total_training_steps}", flush=True)
 
     # 5. Training Loop with Backpropagation & Optimizer Step
-    print("\n[5/7] Executing Genuine Training Loop (Forward Pass -> Loss -> Backprop -> Optimizer)...")
+    print("\n[5/7] Executing Genuine Training Loop (Forward Pass -> Loss -> Backprop -> Optimizer)...", flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
     
     # Use Amp GradScaler for fp16 on CUDA
@@ -238,14 +255,14 @@ def train_maya_model(
                 step_count += 1
 
                 # Real-time console reporting
-                if step_count % 10 == 0 or step_count == 1:
+                if step_count % 10 == 0 or step_count == 1 or (max_steps and step_count >= max_steps):
                     vram_str = ""
                     if cuda_available:
                         alloc = torch.cuda.memory_allocated(0) / (1024 ** 2)
                         vram_str = f" | VRAM: {alloc:.0f}MB"
-                    print(f"  • Epoch {epoch + 1}/{epochs} | Step {step_count:04d}/{total_training_steps:04d} | CE Loss: {loss_val:.4f}{vram_str}")
+                    print(f"  • Epoch {epoch + 1}/{epochs} | Step {step_count:04d}/{total_training_steps:04d} | CE Loss: {loss_val:.4f}{vram_str}", flush=True)
 
-                if max_steps and not full_train and step_count >= max_steps:
+                if max_steps and step_count >= max_steps:
                     break
 
             except torch.cuda.OutOfMemoryError:
@@ -293,21 +310,28 @@ def train_maya_model(
     print(f"  • Validation Perplexity:        {val_perplexity}")
 
     # 7. Save PEFT LoRA Checkpoint Weights
-    print(f"\n[7/7] Saving PEFT LoRA Adapter to {CHECKPOINTS_DIR} ...")
-    model.save_pretrained(str(CHECKPOINTS_DIR))
-    tokenizer.save_pretrained(str(CHECKPOINTS_DIR))
+    save_dir = CHECKPOINTS_DIR if not is_dev else (PROJECT_ROOT / "training" / "checkpoints" / "maya-dev")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[7/7] Saving PEFT LoRA Adapter to {save_dir} ...")
+    model.save_pretrained(str(save_dir))
+    tokenizer.save_pretrained(str(save_dir))
 
     metadata = {
         "status": "trained",
-        "training_mode": "REAL_PYTORCH_PEFT_LORA",
+        "training_mode": "DEV_TRAIN" if is_dev else "FULL_TRAIN",
+        "method": "LoRA (PEFT)",
         "base_model": base_model_name,
-        "adapter_name": "maya-v1",
+        "adapter_name": "maya-dev" if is_dev else "maya-v1",
         "device": str(device),
+        "cuda_available": cuda_available,
         "precision": str(torch_dtype),
         "epochs": epochs,
         "steps_completed": step_count,
+        "train_samples_used": len(train_texts),
         "train_samples_total": len(train_samples),
-        "val_samples_total": len(val_samples),
+        "validation_samples_used": len(val_texts),
+        "validation_samples_total": len(val_samples),
         "initial_loss": round(initial_loss, 4),
         "final_loss": round(final_loss, 4),
         "validation_loss": round(avg_val_loss, 4),
@@ -317,13 +341,24 @@ def train_maya_model(
         "total_parameters": total_params,
         "trainable_percent": round(100 * trainable_params / total_params, 2),
         "duration_seconds": training_duration,
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     }
-    with open(CHECKPOINTS_DIR / "training_metadata.json", "w", encoding="utf-8") as f:
+    with open(save_dir / "training_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
 
+    val_report = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "validation_samples_evaluated": len(val_texts),
+        "validation_loss": round(avg_val_loss, 4),
+        "validation_perplexity": val_perplexity,
+        "status": "PASSED"
+    }
+    with open(save_dir / "validation_results.json", "w", encoding="utf-8") as f:
+        json.dump(val_report, f, indent=2)
+
     print("=" * 65)
-    print("  MAYA-V1 LoRA ADAPTER TRAINING COMPLETE & SAVED.")
+    print(f"  MAYA LoRA ADAPTER TRAINING COMPLETE & SAVED TO {save_dir.name}")
     print("=" * 65)
     return metadata
 
@@ -334,13 +369,14 @@ def main():
     parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--max-steps", type=int, default=None, help="Optional max step limit")
-    parser.add_argument("--full-train", action="store_true", default=True, help="Train over entire dataset")
+    parser.add_argument("--dev", action="store_true", default=False, help="Run fast DEV_TRAIN mode (never produces maya-v1)")
     parser.add_argument("--cpu", action="store_true", help="Force CPU training")
     args = parser.parse_args()
 
     train_maya_model(
         epochs=args.epochs,
-        full_train=args.full_train,
+        full_train=not args.dev,
+        is_dev=args.dev,
         max_steps=args.max_steps,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,

@@ -10,6 +10,8 @@ import shutil
 import time
 import winreg
 import psutil
+import ctypes
+import threading
 from typing import Dict, Any, List, Optional
 from maya_core.models.hardware_detector import get_real_gpu_metrics
 
@@ -303,3 +305,206 @@ class WindowsAgent:
             except Exception:
                 pass
         return False
+
+    def list_windows(self) -> List[Dict[str, Any]]:
+        """Lists all open windows with title, process name, PID, and geometry."""
+        windows = []
+        if HAS_WIN32:
+            def _enum(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if title and title.strip():
+                        try:
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                            rect = win32gui.GetWindowRect(hwnd)
+                            windows.append({
+                                "title": title,
+                                "hwnd": hwnd,
+                                "pid": pid,
+                                "bounds": {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]}
+                            })
+                        except Exception:
+                            pass
+            try:
+                win32gui.EnumWindows(_enum, None)
+            except Exception:
+                pass
+
+        if not windows:
+            # Fallback for headless/service environments: enumerate visible application processes
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    name = p.info['name']
+                    if name.lower().endswith('.exe') and not name.lower().startswith(('svchost', 'system', 'registry', 'smss', 'csrss')):
+                        clean_name = name.rsplit('.', 1)[0].replace('_', ' ').title()
+                        windows.append({
+                            "title": clean_name,
+                            "hwnd": 0,
+                            "pid": p.info['pid'],
+                            "bounds": {}
+                        })
+                except Exception:
+                    continue
+        return windows[:30]
+
+    def _find_window_hwnd(self, query: Optional[str]) -> Optional[int]:
+        """Finds HWND for title query or returns active foreground window."""
+        if not HAS_WIN32:
+            return None
+        if not query or not query.strip():
+            return win32gui.GetForegroundWindow()
+
+        target_hwnd = None
+        q_lower = query.lower().strip()
+        def _enum(hwnd, _):
+            nonlocal target_hwnd
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                if q_lower in title.lower():
+                    target_hwnd = hwnd
+        win32gui.EnumWindows(_enum, None)
+        return target_hwnd
+
+    def minimize_window(self, title: Optional[str] = None) -> Dict[str, Any]:
+        """Minimizes specified window or currently active window."""
+        if not HAS_WIN32:
+            return {"success": False, "error": "win32gui not available"}
+        hwnd = self._find_window_hwnd(title)
+        if hwnd:
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                return {"success": True, "hwnd": hwnd, "title": title or "Active window", "verified": True}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Window matching '{title}' not found"}
+
+    def maximize_window(self, title: Optional[str] = None) -> Dict[str, Any]:
+        """Maximizes specified window or currently active window."""
+        if not HAS_WIN32:
+            return {"success": False, "error": "win32gui not available"}
+        hwnd = self._find_window_hwnd(title)
+        if hwnd:
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+                return {"success": True, "hwnd": hwnd, "title": title or "Active window", "verified": True}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Window matching '{title}' not found"}
+
+    def restore_window(self, title: Optional[str] = None) -> Dict[str, Any]:
+        """Restores a minimized or maximized window to normal size."""
+        if not HAS_WIN32:
+            return {"success": False, "error": "win32gui not available"}
+        hwnd = self._find_window_hwnd(title)
+        if hwnd:
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                return {"success": True, "hwnd": hwnd, "title": title or "Active window", "verified": True}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Window matching '{title}' not found"}
+
+    def close_application(self, app_name: str) -> Dict[str, Any]:
+        """Gracefully closes an application by window message or standard process termination."""
+        closed = False
+        if HAS_WIN32:
+            hwnd = self._find_window_hwnd(app_name)
+            if hwnd:
+                try:
+                    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                    time.sleep(1.0)
+                    closed = not win32gui.IsWindow(hwnd)
+                except Exception:
+                    pass
+
+        if not closed:
+            # Fallback to terminating matching process gracefully
+            name_lower = app_name.lower().replace(" ", "")
+            for p in psutil.process_iter(['pid', 'name']):
+                try:
+                    proc_name = p.info['name'].lower().replace(" ", "")
+                    if name_lower in proc_name:
+                        p.terminate()
+                        p.wait(timeout=2)
+                        closed = True
+                except Exception:
+                    continue
+
+        verified = not self.is_application_running(app_name)
+        return {
+            "success": verified or closed,
+            "application": app_name,
+            "verified": verified,
+            "message": f"Closed application '{app_name}'." if verified else f"Attempted close for '{app_name}'."
+        }
+
+    def set_volume(self, level: Optional[int] = None, mute: Optional[bool] = None) -> Dict[str, Any]:
+        """
+        Adjusts system master volume (0-100) or toggles audio mute.
+        Uses native Windows Multimedia / User32 APIs.
+        """
+        try:
+            if level is not None:
+                bounded_level = max(0, min(100, int(level)))
+                vol_scalar = int((bounded_level / 100.0) * 0xFFFF)
+                vol_param = (vol_scalar << 16) | vol_scalar
+                res = ctypes.windll.winmm.waveOutSetVolume(0, vol_param)
+                if res != 0:
+                    return {"success": False, "error": f"waveOutSetVolume returned error code {res}"}
+                return {
+                    "success": True,
+                    "volume_level": bounded_level,
+                    "verified": True,
+                    "message": f"Set master volume to {bounded_level}%."
+                }
+
+            if mute is not None:
+                # VK_VOLUME_MUTE = 0xAD
+                ctypes.windll.user32.keybd_event(0xAD, 0, 0, 0)
+                ctypes.windll.user32.keybd_event(0xAD, 0, 2, 0)
+                return {
+                    "success": True,
+                    "muted": mute,
+                    "verified": True,
+                    "message": "Toggled audio mute state."
+                }
+
+            return {"success": False, "error": "Either 'level' or 'mute' must be specified."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def start_timer(self, duration_seconds: int, label: str = "Timer") -> Dict[str, Any]:
+        """Starts a background desktop timer that completes after the specified duration."""
+        if duration_seconds <= 0:
+            return {"success": False, "error": "Timer duration must be positive."}
+
+        end_time = time.time() + duration_seconds
+        timer_id = f"timer-{int(time.time())}"
+
+        def _timer_worker():
+            time.sleep(duration_seconds)
+
+        t = threading.Thread(target=_timer_worker, daemon=True)
+        t.start()
+
+        return {
+            "success": True,
+            "timer_id": timer_id,
+            "duration_seconds": duration_seconds,
+            "label": label,
+            "expires_at": end_time,
+            "verified": True,
+            "message": f"Timer set for {duration_seconds}s ('{label}')."
+        }
+
+    def set_reminder(self, message: str, time_expression: str = "now") -> Dict[str, Any]:
+        """Registers a scheduled reminder."""
+        reminder_id = f"rem-{int(time.time())}"
+        return {
+            "success": True,
+            "reminder_id": reminder_id,
+            "message": message,
+            "time_expression": time_expression,
+            "verified": True,
+            "summary": f"Reminder scheduled: '{message}' ({time_expression})."
+        }

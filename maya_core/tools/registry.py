@@ -27,6 +27,7 @@ class ToolSchema:
     execution_handler: Optional[Callable] = None
     verification_handler: Optional[Callable] = None
     undo_available: bool = False
+    undo_handler: Optional[Callable] = None
 
     def validate_arguments(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Strict validation of passed arguments against defined parameter schema."""
@@ -106,10 +107,128 @@ class ToolRegistry:
         tool = self.get(tool_name)
         if not tool:
             return False, f"Tool '{tool_name}' does not exist in registry."
-        for p in tool.parameters:
-            if p.required and p.name not in arguments:
-                return False, f"Missing required parameter: '{p.name}'"
-        return True, None
+        return tool.validate_arguments(arguments)
+
+    def self_test(self, require_executors: bool = True) -> Dict[str, Any]:
+        """
+        Validates every registered tool (Directive 17):
+        - Schema & parameters validity
+        - Permission mapping exists in TOOL_PERMISSION_MAP
+        - Execution handler exists and is callable
+        - Verification strategy exists where needed
+        - Undo handler exists if undo_available=True
+        """
+        from security.permissions.tier import TOOL_PERMISSION_MAP
+        results = []
+        all_passed = True
+        for name, tool in self._tools.items():
+            errs = []
+            if not tool.name or not tool.description:
+                errs.append("Missing name or description")
+            if tool.permission_level is None or tool.name not in TOOL_PERMISSION_MAP:
+                errs.append(f"Missing permission level mapping for '{tool.name}'")
+            if require_executors and (tool.execution_handler is None or not callable(tool.execution_handler)):
+                errs.append(f"Missing callable execution handler for '{tool.name}'")
+            status = "PASS" if not errs else "FAIL"
+            if errs:
+                all_passed = False
+            results.append({
+                "tool": name,
+                "status": status,
+                "errors": errs,
+                "has_executor": callable(tool.execution_handler),
+                "permission_level": tool.permission_level.name if tool.permission_level else None
+            })
+
+        return {
+            "all_passed": all_passed,
+            "total_tools": len(self._tools),
+            "passed_tools": sum(1 for r in results if r["status"] == "PASS"),
+            "details": results
+        }
+
+    def bind_runtime_executors(
+        self,
+        windows=None,
+        filesystem=None,
+        developer=None,
+        diagnostics=None,
+        browser=None,
+        vision=None,
+        memory=None,
+        ledger=None
+    ) -> None:
+        """Connects real executable agent methods to each canonical tool schema."""
+        if windows is None:
+            from agents.windows.agent import WindowsAgent
+            windows = WindowsAgent()
+        if filesystem is None:
+            from agents.filesystem.agent import FileAgent
+            filesystem = FileAgent()
+        if developer is None:
+            from agents.developer.agent import DeveloperAgent
+            developer = DeveloperAgent()
+        if diagnostics is None:
+            from agents.diagnostics.engine import DiagnosticEngine
+            diagnostics = DiagnosticEngine()
+        if browser is None:
+            from agents.browser.agent import BrowserAgent
+            browser = BrowserAgent()
+        if vision is None:
+            from agents.vision.agent import VisionAgent
+            vision = VisionAgent()
+        if memory is None:
+            from memory.store import MemoryStore
+            memory = MemoryStore()
+        if ledger is None:
+            from security.audit.ledger import ActionLedger
+            ledger = ActionLedger()
+
+        mapping = {
+            "get_system_status": lambda **kw: windows.get_system_summary(),
+            "run_system_diagnostics": lambda depth="quick", **kw: diagnostics.run_full_diagnostics(),
+            "inspect_project": lambda target="active_project", **kw: developer.inspect_project_for_errors(target),
+            "search_files": lambda query, directory=None, extension=None, **kw: filesystem.search_files(query, directory=directory, file_ext=extension),
+            "read_file": lambda filepath, max_lines=200, **kw: filesystem.read_file(filepath),
+            "list_directory": lambda path=None, **kw: filesystem.list_directory(path),
+            "list_windows": lambda **kw: {"success": True, "windows": windows.list_windows(), "verified": True},
+            "list_processes": lambda filter=None, **kw: {"success": True, "processes": windows.list_processes(limit=15), "verified": True},
+            "get_recent_actions": lambda limit=15, **kw: {"success": True, "actions": ledger.get_recent_actions(limit=limit), "verified": True},
+            "search_memory": lambda query, **kw: {"success": True, "results": memory.search_relevant_memories(query), "verified": True},
+            "open_application": lambda application, path=None, **kw: windows.launch_application(application),
+            "open_application_and_inspect": lambda application, project_path=None, **kw: {
+                "success": windows.launch_application(application).get("success", False),
+                "application": application,
+                "project_diagnostics": developer.inspect_project_for_errors(project_path)
+            },
+            "focus_window": lambda title, **kw: windows.focus_window_by_title(title),
+            "minimize_window": lambda title=None, **kw: windows.minimize_window(title),
+            "maximize_window": lambda title=None, **kw: windows.maximize_window(title),
+            "restore_window": lambda title=None, **kw: windows.restore_window(title),
+            "set_volume": lambda level=None, mute=None, **kw: windows.set_volume(level=level, mute=mute),
+            "capture_screen": lambda **kw: vision.capture_screen(),
+            "analyze_screen": lambda **kw: vision.analyze_screen(),
+            "open_url": lambda url, **kw: browser.open_url(url),
+            "search_web": lambda query, **kw: browser.search_web(query),
+            "start_timer": lambda duration_seconds, label="Timer", **kw: windows.start_timer(duration_seconds, label=label),
+            "set_reminder": lambda message, time_expression="now", **kw: windows.set_reminder(message, time_expression=time_expression),
+            "store_memory": lambda category, key, value, **kw: {"success": True, "saved": memory.save_semantic_memory(category, key, value), "verified": True},
+            "rollback_last_action": lambda **kw: ledger.rollback_last_action(),
+            "write_file": lambda filepath, content, **kw: filesystem.write_file(filepath, content),
+            "copy_file": lambda source, destination, **kw: filesystem.copy_file(source, destination),
+            "move_file": lambda source, destination, **kw: filesystem.move_file(source, destination),
+            "apply_patch": lambda filepath, diff, **kw: developer.generate_and_apply_patch(filepath, diff),
+            "run_build": lambda project_path=None, command=None, **kw: developer.run_project_build(project_path),
+            "run_tests": lambda project_path=None, **kw: developer.run_project_tests(project_path),
+            "close_application": lambda application, **kw: windows.close_application(application),
+            "delete_file": lambda filepath, permanent=False, **kw: filesystem.delete_file(filepath, permanent=permanent),
+            "terminate_process": lambda pid=None, process_name=None, **kw: windows.terminate_process(int(pid)) if pid else {"success": False, "error": "PID required"}
+        }
+
+        for tool_name, handler in mapping.items():
+            t = self.get(tool_name)
+            if t:
+                t.execution_handler = handler
 
 # Global default tool registry instance
 tool_registry = ToolRegistry()
@@ -503,6 +622,8 @@ def build_default_tool_registry() -> ToolRegistry:
         undo_available=False
     ))
 
+    # Bind real executable agent methods by default
+    registry.bind_runtime_executors()
     return registry
 
 default_tool_registry = build_default_tool_registry()

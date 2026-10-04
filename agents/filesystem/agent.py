@@ -265,3 +265,91 @@ class FileAgent:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def list_directory(self, path: Optional[str] = None) -> Dict[str, Any]:
+        """Lists directory entries with file sizes and modification timestamps."""
+        target = self._resolve_search_path(path)
+        if not target.exists() or not target.is_dir():
+            return {"success": False, "error": f"Directory not found: {target}"}
+
+        items = []
+        try:
+            for entry in os.scandir(str(target)):
+                try:
+                    stat = entry.stat()
+                    items.append({
+                        "name": entry.name,
+                        "is_dir": entry.is_dir(),
+                        "size_bytes": stat.st_size if not entry.is_dir() else 0,
+                        "size_kb": round(stat.st_size / 1024, 2) if not entry.is_dir() else 0,
+                        "modified": stat.st_mtime
+                    })
+                except Exception:
+                    continue
+            items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+            return {
+                "success": True,
+                "directory": str(target),
+                "count": len(items),
+                "items": items[:100]
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def copy_file(self, source: str, destination: str) -> Dict[str, Any]:
+        """Copies file or directory to destination and verifies."""
+        s = Path(source).resolve()
+        d = Path(destination).resolve()
+        if not s.exists():
+            return {"success": False, "error": f"Source does not exist: {s}"}
+
+        try:
+            if s.is_dir():
+                if d.exists():
+                    d = d / s.name
+                shutil.copytree(str(s), str(d))
+            else:
+                d.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(s), str(d))
+
+            verified = d.exists()
+            return {
+                "success": verified,
+                "source": str(s),
+                "destination": str(d),
+                "verified": verified,
+                "previous_state": {"copied_destination": str(d)}
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def delete_file(self, filepath: str, permanent: bool = False) -> Dict[str, Any]:
+        """Safely deletes a file with automatic undo snapshot caching."""
+        p = Path(filepath).resolve()
+        if not p.exists():
+            return {"success": False, "error": f"Target does not exist: {p}"}
+
+        undo_cache_dir = CACHE_DIR / "undo_trash"
+        undo_cache_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = undo_cache_dir / f"{int(time.time())}_{p.name}"
+
+        try:
+            # Preserve backup snapshot for rollback
+            if p.is_file():
+                shutil.copy2(str(p), str(backup_path))
+                os.remove(str(p))
+            else:
+                shutil.copytree(str(p), str(backup_path))
+                shutil.rmtree(str(p))
+
+            verified = not p.exists()
+            return {
+                "success": verified,
+                "filepath": str(p),
+                "verified": verified,
+                "backup_snapshot": str(backup_path) if backup_path.exists() else None,
+                "previous_state": {"backup_snapshot": str(backup_path), "original_path": str(p)},
+                "message": f"Deleted '{p.name}'." if verified else f"Failed to confirm deletion of '{p.name}'."
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}

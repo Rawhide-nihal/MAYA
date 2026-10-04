@@ -80,6 +80,9 @@ class MayaCheckpointProvider(BaseModelProvider):
                 self.device = "cpu"
                 torch_dtype = torch.float32
 
+            if self.device == "cpu":
+                torch.set_num_threads(1)
+
             print(f"[MayaCheckpointProvider] Loading model on {self.device} ({torch_dtype})...")
             self.tokenizer = AutoTokenizer.from_pretrained(str(self.checkpoint_dir), trust_remote_code=True)
             if self.tokenizer.pad_token is None:
@@ -89,6 +92,7 @@ class MayaCheckpointProvider(BaseModelProvider):
                 self.base_model_name,
                 torch_dtype=torch_dtype,
                 device_map=self.device,
+                low_cpu_mem_usage=False,
                 trust_remote_code=True
             )
             self.model = PeftModel.from_pretrained(base_model, str(self.checkpoint_dir))
@@ -98,6 +102,14 @@ class MayaCheckpointProvider(BaseModelProvider):
         except Exception as e:
             print(f"[MayaCheckpointProvider] Failed to load neural weights: {e}")
             return False
+
+    def load_checkpoint(self, checkpoint_dir: Optional[Path] = None) -> bool:
+        if checkpoint_dir:
+            self.checkpoint_dir = Path(checkpoint_dir)
+        self.model = None
+        self.tokenizer = None
+        self._load_metadata()
+        return self._ensure_model_loaded()
 
     def is_available(self) -> bool:
         weights_file = self.checkpoint_dir / "adapter_model.safetensors"
@@ -142,11 +154,10 @@ class MayaCheckpointProvider(BaseModelProvider):
         from transformers import TextIteratorStreamer
         from threading import Thread
 
-        sys_p = system_prompt or "You are MAYA, a helpful, intelligent personal AI desktop companion."
-        messages = [
-            {"role": "system", "content": sys_p},
-            {"role": "user", "content": prompt}
-        ]
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
         if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template:
             try:
@@ -159,16 +170,18 @@ class MayaCheckpointProvider(BaseModelProvider):
         inputs = self.tokenizer(formatted, return_tensors="pt").to(self.device)
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
 
+        do_sample = kwargs.get("do_sample", True)
         generation_kwargs = dict(
             input_ids=inputs["input_ids"],
             attention_mask=inputs.get("attention_mask"),
             streamer=streamer,
             max_new_tokens=kwargs.get("max_new_tokens", 160),
-            temperature=kwargs.get("temperature", 0.7),
-            top_p=kwargs.get("top_p", 0.9),
-            do_sample=kwargs.get("do_sample", True),
+            do_sample=do_sample,
             pad_token_id=self.tokenizer.pad_token_id
         )
+        if do_sample:
+            generation_kwargs["temperature"] = kwargs.get("temperature", 0.7)
+            generation_kwargs["top_p"] = kwargs.get("top_p", 0.9)
 
         thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
         thread.start()
@@ -271,6 +284,13 @@ class MayaModelRuntime:
         info["offline_mode"] = settings.get("offline_only", True)
         info["lifecycle_state"] = self.manager.state
         return info
+
+    def load_checkpoint(self, checkpoint_dir: Optional[Path] = None) -> bool:
+        if isinstance(self.maya_provider, MayaCheckpointProvider):
+            ok = self.maya_provider.load_checkpoint(checkpoint_dir)
+            self.manager._update_state()
+            return ok
+        return False
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None, **kwargs) -> str:
         return self.active_provider.generate(prompt, system_prompt, **kwargs)

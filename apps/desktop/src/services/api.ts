@@ -198,6 +198,18 @@ export const MayaApi = {
     return await res.json();
   },
 
+  async sendPttAudio(audioBase64: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/voice/ptt`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify({ audio_base64: audioBase64 })
+    });
+    return await res.json();
+  },
+
   subscribeToEvents(onEvent: (event: string, data: any) => void): () => void {
     const es = new EventSource(`${API_BASE}/events`);
 

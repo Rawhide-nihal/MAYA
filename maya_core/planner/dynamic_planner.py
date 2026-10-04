@@ -371,7 +371,7 @@ class DynamicTaskPlanner:
 
         tool_res = self.execute_tool(step.tool, step.arguments, token=permission_token, plan_id=plan.plan_id)
         self.permissions.consume_token(permission_token)
-        is_success = tool_res.get("success", True)
+        is_success = tool_res.get("success", False)
         is_verified = tool_res.get("verified", is_success)
 
         step.state = StepState.SUCCESS if is_success else StepState.FAILED
@@ -418,7 +418,7 @@ class DynamicTaskPlanner:
                     "confirmation_id": next_step.confirmation_id
                 }
 
-            step_ok = next_res.get("success", True)
+            step_ok = next_res.get("success", False)
             next_step.state = StepState.SUCCESS if step_ok else StepState.FAILED
             next_step.result = next_res
             next_step.verified = next_res.get("verified", step_ok)
@@ -475,14 +475,37 @@ class DynamicTaskPlanner:
             result = {"success": is_alive, "verified": is_alive, "application": app}
             summary = f"Verified {app} running status: {is_alive}"
 
+        elif tool_name == "close_application":
+            app = arguments.get("application", "")
+            result = self.windows.close_application(app)
+            affected_resources.append(app)
+            summary = f"Closed application '{app}'"
+
         elif tool_name == "focus_window":
-            q = arguments.get("query", "")
+            q = arguments.get("query") or arguments.get("title", "")
             result = self.windows.focus_window_by_title(q)
             summary = f"Focused window matching '{q}'"
 
+        elif tool_name == "minimize_window":
+            result = self.windows.minimize_window(arguments.get("title"))
+            summary = f"Minimizing window '{arguments.get('title', 'active')}'"
+
+        elif tool_name == "maximize_window":
+            result = self.windows.maximize_window(arguments.get("title"))
+            summary = f"Maximizing window '{arguments.get('title', 'active')}'"
+
+        elif tool_name == "restore_window":
+            result = self.windows.restore_window(arguments.get("title"))
+            summary = f"Restoring window '{arguments.get('title', 'active')}'"
+
+        elif tool_name == "list_windows":
+            wins = self.windows.list_windows()
+            result = {"success": True, "windows": wins, "count": len(wins), "verified": True}
+            summary = f"Listed {len(wins)} desktop windows"
+
         elif tool_name == "list_processes":
             procs = self.windows.list_processes(limit=arguments.get("limit", 15), sort_by=arguments.get("sort_by", "memory"))
-            result = {"success": True, "processes": procs, "count": len(procs)}
+            result = {"success": True, "processes": procs, "count": len(procs), "verified": True}
             summary = f"Listed top {len(procs)} processes"
 
         elif tool_name == "terminate_process":
@@ -490,32 +513,65 @@ class DynamicTaskPlanner:
             result = self.windows.terminate_process(pid)
             summary = result.get("message", f"Terminated process {pid}")
 
+        elif tool_name == "set_volume":
+            result = self.windows.set_volume(level=arguments.get("level"), mute=arguments.get("mute"))
+            summary = f"Adjusted audio volume: {result.get('message', 'ok')}"
+
+        elif tool_name == "start_timer":
+            dur = arguments.get("duration_seconds", 60)
+            lbl = arguments.get("label", "Timer")
+            result = self.windows.start_timer(dur, label=lbl)
+            summary = f"Started timer for {dur}s ({lbl})"
+
+        elif tool_name == "set_reminder":
+            msg = arguments.get("message", "")
+            expr = arguments.get("time_expression", "now")
+            result = self.windows.set_reminder(msg, time_expression=expr)
+            summary = f"Set reminder: '{msg}'"
+
         # Diagnostics tools
         elif tool_name in ["run_system_diagnostics", "get_system_status"]:
             result = self.diagnostics.run_full_diagnostics()
             summary = f"Ran system diagnostics (Status: {result.get('status')})"
 
         elif tool_name == "prioritize_findings":
-            result = {"success": True, "prioritized": True}
+            result = {"success": True, "prioritized": True, "verified": True}
             summary = "Prioritized diagnostic findings by severity"
 
         # Developer & Coding tools
+        elif tool_name == "open_application_and_inspect":
+            app = arguments.get("application", "Visual Studio Code")
+            proj = arguments.get("project_path")
+            app_res = self.windows.launch_application(app)
+            diag_res = self.developer.inspect_project_for_errors(proj)
+            result = {
+                "success": app_res.get("success", False),
+                "application": app,
+                "app_launch": app_res,
+                "project_inspection": diag_res,
+                "verified": app_res.get("verified", False)
+            }
+            affected_resources.append(app)
+            summary = f"Opened {app} and inspected workspace ({diag_res.get('issues_count', 0)} issues)"
+
         elif tool_name == "inspect_project":
             result = self.developer.inspect_project_for_errors(arguments.get("target"))
             affected_resources.append(result.get("path", ""))
             summary = f"Scanned project {result.get('project')}: {result.get('issues_count')} issue(s)"
 
-        elif tool_name == "build_project":
-            result = self.developer.run_project_build(arguments.get("target"))
+        elif tool_name in ["run_build", "build_project"]:
+            target_proj = arguments.get("project_path") or arguments.get("target")
+            result = self.developer.run_project_build(target_proj)
             summary = f"Ran project build: {'Success' if result.get('success') else 'Failed'}"
 
         elif tool_name == "run_tests":
-            result = self.developer.run_project_tests(arguments.get("target"))
+            target_proj = arguments.get("project_path") or arguments.get("target")
+            result = self.developer.run_project_tests(target_proj)
             summary = f"Ran test suite: {'Passed' if result.get('success') else 'Failed'}"
 
         elif tool_name == "apply_patch":
             fp = arguments.get("filepath", "")
-            nc = arguments.get("new_content", "")
+            nc = arguments.get("new_content") or arguments.get("diff", "")
             result = self.developer.generate_and_apply_patch(fp, nc)
             affected_resources.append(fp)
             prev_state = {"original_content": result.get("original_content")}
@@ -523,27 +579,32 @@ class DynamicTaskPlanner:
             summary = f"Applied code patch to {fp}"
 
         # Filesystem tools
+        elif tool_name == "list_directory":
+            result = self.filesystem.list_directory(arguments.get("path"))
+            summary = f"Listed directory contents ({result.get('count', 0)} items)"
+
         elif tool_name == "search_files":
             q = arguments.get("query", "")
             d = arguments.get("directory")
-            matches = self.filesystem.search_files(q, directory=d)
-            result = {"success": True, "matches": matches, "count": len(matches)}
+            ext = arguments.get("extension")
+            matches = self.filesystem.search_files(q, directory=d, file_ext=ext)
+            result = {"success": True, "matches": matches, "count": len(matches), "verified": True}
             summary = f"Searched files for '{q}' ({len(matches)} found)"
 
         elif tool_name == "search_file_content":
             q = arguments.get("query", "")
             matches = self.filesystem.search_file_content(q, directory=arguments.get("directory"))
-            result = {"success": True, "matches": matches, "count": len(matches)}
+            result = {"success": True, "matches": matches, "count": len(matches), "verified": True}
             summary = f"Searched content for '{q}'"
 
         elif tool_name == "find_largest_files":
             files = self.filesystem.find_largest_files(arguments.get("directory"), limit=arguments.get("limit", 10))
-            result = {"success": True, "files": files}
+            result = {"success": True, "files": files, "verified": True}
             summary = f"Located largest {len(files)} files"
 
         elif tool_name == "find_duplicates":
             dups = self.filesystem.find_duplicates(arguments.get("directory"))
-            result = {"success": True, "duplicates": dups}
+            result = {"success": True, "duplicates": dups, "verified": True}
             summary = f"Detected {len(dups)} duplicate candidates"
 
         elif tool_name == "read_file":
@@ -559,6 +620,15 @@ class DynamicTaskPlanner:
             undo_available = True
             summary = f"Wrote file {fp}"
 
+        elif tool_name == "copy_file":
+            src = arguments.get("source", "")
+            dst = arguments.get("destination", "")
+            result = self.filesystem.copy_file(src, dst)
+            affected_resources.extend([src, dst])
+            prev_state = result.get("previous_state")
+            undo_available = True
+            summary = f"Copied {src} -> {dst}"
+
         elif tool_name == "move_file":
             src = arguments.get("source", "")
             dst = arguments.get("destination", "")
@@ -567,6 +637,15 @@ class DynamicTaskPlanner:
             prev_state = {"original_path": src}
             undo_available = True
             summary = f"Moved {src} -> {dst}"
+
+        elif tool_name == "delete_file":
+            fp = arguments.get("filepath", "")
+            perm = arguments.get("permanent", False)
+            result = self.filesystem.delete_file(fp, permanent=perm)
+            affected_resources.append(fp)
+            prev_state = result.get("previous_state")
+            undo_available = True
+            summary = f"Deleted file {fp}"
 
         elif tool_name == "clean_temp_files":
             result = self.filesystem.clean_temp_files()
@@ -591,12 +670,18 @@ class DynamicTaskPlanner:
             summary = f"Web search for '{arguments.get('query')}'"
 
         # Memory & Ledger
+        elif tool_name == "search_memory":
+            q = arguments.get("query", "")
+            mems = self.memory.search_relevant_memories(q)
+            result = {"success": True, "results": mems, "count": len(mems), "verified": True}
+            summary = f"Found {len(mems)} memories matching '{q}'"
+
         elif tool_name == "store_memory":
             cat = arguments.get("category", "facts")
             k = arguments.get("key", "info")
-            c = arguments.get("content", "")
-            self.memory.save_semantic_memory(cat, k, c)
-            result = {"success": True}
+            val = arguments.get("value") or arguments.get("content", "")
+            self.memory.save_semantic_memory(cat, k, val)
+            result = {"success": True, "category": cat, "key": k, "value": val, "verified": True}
             summary = f"Saved memory: {cat}/{k}"
 
         elif tool_name == "rollback_last_action":
@@ -604,12 +689,12 @@ class DynamicTaskPlanner:
             summary = result.get("message", "Rolled back last action")
 
         elif tool_name == "get_recent_actions":
-            acts = self.ledger.get_recent_actions(limit=arguments.get("limit", 5))
-            result = {"success": True, "actions": acts}
+            acts = self.ledger.get_recent_actions(limit=arguments.get("limit", 15))
+            result = {"success": True, "actions": acts, "verified": True}
             summary = f"Retrieved {len(acts)} recent actions"
 
         elif tool_name == "report_findings":
-            result = {"success": True, "reported": True}
+            result = {"success": True, "reported": True, "verified": True}
             summary = "Reported diagnostic and inspection findings"
 
         else:
@@ -617,7 +702,7 @@ class DynamicTaskPlanner:
 
         # Action Ledger Recording
         action_id = str(uuid.uuid4())[:8]
-        is_success = result.get("success", True)
+        is_success = result.get("success", False)
         record = ActionRecord(
             action_id=action_id,
             plan_id=plan_id,

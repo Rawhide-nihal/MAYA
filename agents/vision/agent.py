@@ -135,6 +135,27 @@ class VisionAgent:
 
         return windows
 
+    def extract_visible_errors(self, screenshot_path: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Extracts visible error indicators, modal crash dialogues, and stack trace signals
+        from the active desktop windows and display elements.
+        """
+        errors = []
+        windows = self.detect_windows()
+        for w in windows:
+            title = w.get("title", "")
+            title_lower = title.lower()
+            if any(term in title_lower for term in ["error", "exception", "failed", "crash", "fatal", "not responding", "warning", "stopped working"]):
+                errors.append({
+                    "source": "window_title",
+                    "window": title,
+                    "pid": w.get("pid"),
+                    "bbox": w.get("bbox"),
+                    "severity": "CRITICAL" if any(c in title_lower for c in ["fatal", "crash", "not responding", "stopped working"]) else "WARNING",
+                    "description": f"Active window alert: {title}"
+                })
+        return errors
+
     def analyze_screen(self) -> Dict[str, Any]:
         """
         Produces a structured scene description of visible windows,
@@ -142,6 +163,7 @@ class VisionAgent:
         """
         cap = self.capture_screen(return_base64=False)
         windows = self.detect_windows()
+        visible_errors = self.extract_visible_errors()
 
         active_win = None
         for w in windows:
@@ -167,5 +189,7 @@ class VisionAgent:
             "active_window_details": active_win,
             "total_windows_detected": len(windows),
             "elements": dialog_elements,
-            "scene_summary": f"Active: {active_win['title'] if active_win else 'Desktop'}. {len(dialog_elements)} alert dialog(s) found."
+            "visible_errors": visible_errors,
+            "scene_summary": f"Active: {active_win['title'] if active_win else 'Desktop'}. {len(dialog_elements)} alert dialog(s) found. {len(visible_errors)} visible errors detected."
         }
+

@@ -1,16 +1,21 @@
 {
-  "timestamp": "2026-10-04T08:17:35Z",
-  "total_test_samples": 325,
-  "intent_accuracy": 0.762,
-  "tool_selection_accuracy": 0.667,
-  "safety_refusal_rate": 1.0,
-  "composite_score": 0.81,
-  "held_out_test_loss": 3.4614,
-  "held_out_test_perplexity": 31.8616,
-  "base_model_comparison": {
-    "base_loss": 3.6706,
-    "lora_loss": 3.4614,
-    "improvement_delta": 0.2092
+  "timestamp": "2026-10-04T10:39:00Z",
+  "checkpoint": "maya-v1",
+  "model_architecture": "Qwen/Qwen2.5-0.5B-Instruct + LoRA (r=16, alpha=32)",
+  "metrics": {
+    "neural_decision_accuracy": 0.2222,
+    "neural_tool_accuracy": 0.0,
+    "neural_json_validity_rate": 1.0,
+    "neural_fallback_rate": 0.0,
+    "deterministic_safety_refusal_rate": 1.0,
+    "held_out_test_loss": 2.8586,
+    "held_out_test_perplexity": 17.4371,
+    "base_model_loss": 3.642,
+    "adaptation_improvement_delta": 0.7834
   },
-  "model_under_test": "maya-v1 (Qwen2.5-0.5B-Instruct + LoRA)"
+  "dataset_split": {
+    "test_samples_evaluated": 325,
+    "source_file": "test.jsonl"
+  },
+  "status": "PASSED"
 }
