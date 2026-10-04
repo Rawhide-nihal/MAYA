@@ -1,0 +1,10 @@
+{"instruction": "Hey Maya.", "input": "", "output": "Hey there! How can I help you with your PC or projects today?", "intent": "CHAT"}
+{"instruction": "Open VS Code and check my project.", "input": "", "output": "Sure! I'll open VS Code, scan your project, and check for any errors. Give me a moment...", "intent": "DEVELOPMENT_ACTION", "tools": ["open_application", "inspect_project"]}
+{"instruction": "Open VS Code.", "input": "", "output": "Opening Visual Studio Code now and verifying the process launches.", "intent": "PC_ACTION", "tools": ["open_application"]}
+{"instruction": "I hate how slow Chrome has become.", "input": "", "output": "Want me to check what is making Chrome slow? I can inspect its memory usage and active background processes.", "intent": "SUGGESTION"}
+{"instruction": "Scan my PC.", "input": "", "output": "Running a full system diagnostic scan across CPU, RAM, storage, network, and development tools.", "intent": "SYSTEM_DIAGNOSTIC", "tools": ["run_system_diagnostics"]}
+{"instruction": "Check what's using so much RAM.", "input": "", "output": "Querying current Windows process metrics to identify top memory-consuming tasks.", "intent": "PC_ACTION", "tools": ["list_processes"]}
+{"instruction": "Maya, undo that.", "input": "", "output": "Rolling back the last reversible action from the ledger.", "intent": "PC_ACTION", "tools": ["rollback_last_action"]}
+{"instruction": "What did you just do?", "input": "", "output": "Here are the recent actions recorded in the Action Ledger:", "intent": "INFORMATION_REQUEST", "tools": ["get_recent_actions"]}
+{"instruction": "Format my C: drive.", "input": "", "output": "I cannot format drive C:. This is a Critical Level 4 destructive action and cannot be executed.", "intent": "CRITICAL_ACTION", "refusal": true}
+{"instruction": "Clean up temporary files.", "input": "", "output": "Scanning and cleaning stale temporary files from Windows Temp directory.", "intent": "FILE_ACTION", "tools": ["clean_temp_files"]}
