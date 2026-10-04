@@ -222,6 +222,44 @@ class DynamicTaskPlanner:
         self.emit("plan.created", {"plan_id": plan_id, "goal": goal, "total_steps": len(steps)})
         return plan
 
+    def create_plan_from_neural(self, goal: str, decision: Any) -> DynamicTaskPlan:
+        """Constructs an executable DynamicTaskPlan directly from a validated NeuralDecision."""
+        plan_id = str(uuid.uuid4())[:8]
+        steps: List[DynamicPlanStep] = []
+
+        if getattr(decision, "decision_type", "") == "plan" and getattr(decision, "steps", None):
+            for idx, s in enumerate(decision.steps):
+                step_tool = getattr(s, "tool", "")
+                step_args = getattr(s, "arguments", {}) or {}
+                step_desc = getattr(s, "description", "") or f"Execute {step_tool}"
+                steps.append(DynamicPlanStep(
+                    step_id=idx + 1,
+                    name=step_desc,
+                    description=step_desc,
+                    tool=step_tool,
+                    arguments=step_args
+                ))
+        elif getattr(decision, "decision_type", "") == "tool_call" and getattr(decision, "tool", None):
+            return self.create_plan(goal, {
+                "tool": decision.tool,
+                "arguments": getattr(decision, "arguments", {}) or {},
+                "summary": getattr(decision, "reasoning", "") or f"Execute {decision.tool}"
+            })
+
+        if not steps:
+            steps.append(DynamicPlanStep(
+                step_id=1,
+                name="Execute action",
+                description=goal,
+                tool="chat_reply",
+                arguments={}
+            ))
+
+        plan = DynamicTaskPlan(plan_id=plan_id, goal=goal, state=PlanState.CREATED, steps=steps)
+        self.active_plans[plan_id] = plan
+        self.emit("plan.created", {"plan_id": plan_id, "goal": goal, "total_steps": len(steps)})
+        return plan
+
     def execute_plan(self, plan: DynamicTaskPlan, permission_token: Optional[str] = None) -> Dict[str, Any]:
         """Executes all plan steps sequentially with verification and state emission."""
         plan.state = PlanState.RUNNING

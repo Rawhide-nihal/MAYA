@@ -10,6 +10,8 @@ import json
 import time
 import queue
 import threading
+import hmac
+from urllib.parse import urlparse
 from pathlib import Path
 from flask import Flask, request, jsonify, Response
 
@@ -81,6 +83,13 @@ skills = SkillsRegistry()
 
 # Security & Origin Validation
 ALLOWED_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "null"}
+ALLOWED_EXACT_ORIGINS = {
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "vscode-webview://",
+    "app://maya",
+    "null"
+}
 
 @app.before_request
 def validate_request_security():
@@ -88,26 +97,39 @@ def validate_request_security():
     if request.method == "OPTIONS":
         return
 
-    # Origin / Host validation
-    origin = request.headers.get("Origin", "")
+    # Host validation (loopback only)
     host = request.headers.get("Host", "").split(":")[0]
     if host not in ALLOWED_ORIGIN_HOSTS:
         return jsonify({"error": "Forbidden: Untrusted host"}), 403
 
-    # Auth token check for state-changing endpoints
-    if request.path.startswith("/api/action") or request.path.startswith("/api/settings"):
-        req_token = request.headers.get("X-Maya-Token", "")
-        # Permissive for local GUI, but strictly validate if token header is present
-        if req_token and req_token != AUTH_TOKEN:
-            return jsonify({"error": "Unauthorized session token"}), 401
+    # Strict Origin validation when Origin header is present
+    origin = request.headers.get("Origin", "")
+    if origin:
+        parsed_origin = urlparse(origin)
+        origin_host = parsed_origin.hostname or origin
+        if origin_host not in ALLOWED_ORIGIN_HOSTS and origin not in ALLOWED_EXACT_ORIGINS:
+            return jsonify({"error": "Forbidden: Untrusted origin"}), 403
+
+    # Mandatory Session Token Check for all state-changing endpoints
+    STATE_CHANGING_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+    if request.method in STATE_CHANGING_METHODS:
+        req_token = request.headers.get("X-Maya-Token", "").strip()
+        if not req_token:
+            return jsonify({"error": "Unauthorized: Missing X-Maya-Token session header"}), 401
+        if not hmac.compare_digest(req_token, AUTH_TOKEN):
+            return jsonify({"error": "Unauthorized: Invalid session token"}), 401
 
 @app.after_request
 def apply_secure_cors(response):
     origin = request.headers.get("Origin", "")
-    if any(h in origin for h in ["127.0.0.1", "localhost"]):
-        response.headers['Access-Control-Allow-Origin'] = origin
+    if origin:
+        parsed_origin = urlparse(origin)
+        origin_host = parsed_origin.hostname or origin
+        if origin_host in ALLOWED_ORIGIN_HOSTS or origin in ALLOWED_EXACT_ORIGINS:
+            response.headers['Access-Control-Allow-Origin'] = origin
     else:
         response.headers['Access-Control-Allow-Origin'] = 'http://127.0.0.1:5173'
+
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Maya-Token'
     response.headers['Access-Control-Allow-Methods'] = 'GET,POST,OPTIONS'
     return response
@@ -121,8 +143,8 @@ def event_stream():
         with event_lock:
             event_subscribers.append(q)
         try:
-            # Send initial connection event
-            yield f"data: {json.dumps({'event': 'connected', 'token': AUTH_TOKEN})}\n\n"
+            # Send initial connection event WITHOUT privileged token leak
+            yield f"data: {json.dumps({'event': 'connected', 'status': 'ready'})}\n\n"
             while True:
                 msg = q.get()
                 yield f"data: {msg}\n\n"

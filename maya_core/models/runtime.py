@@ -1,7 +1,7 @@
 """
-MAYA Model Runtime & Provider Stack
-Supports MayaCheckpointProvider (trained safetensors adapter), OllamaProvider, LlamaCppProvider,
-HuggingFaceProvider, and OptionalCloudProvider with token streaming and hot-loading.
+MAYA Model Runtime & Provider Stack (Phase 4 Hardware-Adaptive)
+Supports MayaCheckpointProvider (trained safetensors adapter with CUDA/CPU adaptive execution),
+OllamaProvider, LlamaCppProvider, and MayaModelManager for lifecycle, warm-up, and health monitoring.
 Zero fake model claims.
 """
 from abc import ABC, abstractmethod
@@ -38,6 +38,7 @@ class MayaCheckpointProvider(BaseModelProvider):
     """
     Loads and serves the trained MAYA LoRA checkpoint (maya-v1) via PyTorch and PEFT.
     Provides verified local inference with real autoregressive token generation.
+    Supports CUDA GPU acceleration with automatic fallback to CPU.
     Zero hardcoded responses.
     """
     def __init__(self, checkpoint_dir: Optional[Path] = None):
@@ -46,6 +47,7 @@ class MayaCheckpointProvider(BaseModelProvider):
         self.tokenizer = None
         self.model = None
         self.base_model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+        self.device = "cpu"
         self._load_metadata()
 
     def _load_metadata(self):
@@ -70,19 +72,28 @@ class MayaCheckpointProvider(BaseModelProvider):
             from transformers import AutoTokenizer, AutoModelForCausalLM
             from peft import PeftModel
 
+            # Hardware detection: Prefer CUDA if available
+            if torch.cuda.is_available():
+                self.device = "cuda:0"
+                torch_dtype = torch.float16
+            else:
+                self.device = "cpu"
+                torch_dtype = torch.float32
+
+            print(f"[MayaCheckpointProvider] Loading model on {self.device} ({torch_dtype})...")
             self.tokenizer = AutoTokenizer.from_pretrained(str(self.checkpoint_dir), trust_remote_code=True)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_name,
-                torch_dtype=torch.float32,
-                device_map="cpu",
+                torch_dtype=torch_dtype,
+                device_map=self.device,
                 trust_remote_code=True
             )
             self.model = PeftModel.from_pretrained(base_model, str(self.checkpoint_dir))
             self.model.eval()
-            print(f"[MayaCheckpointProvider] Successfully loaded maya-v1 PEFT adapter on {self.base_model_name}")
+            print(f"[MayaCheckpointProvider] Successfully loaded maya-v1 PEFT adapter on {self.base_model_name} ({self.device})")
             return True
         except Exception as e:
             print(f"[MayaCheckpointProvider] Failed to load neural weights: {e}")
@@ -94,17 +105,27 @@ class MayaCheckpointProvider(BaseModelProvider):
 
     def get_info(self) -> Dict[str, Any]:
         hw = get_hardware_profile()
+        vram_used = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_used = round(torch.cuda.memory_allocated(0) / (1024 ** 2), 1)
+        except Exception:
+            pass
+
         return {
             "name": self.metadata.get("adapter_name", "maya-v1"),
             "base_model": self.base_model_name,
-            "runtime": "Local (PyTorch / PEFT LoRA)",
+            "runtime": f"Local PyTorch/PEFT ({self.device.upper()})",
             "adapter_type": "LoRA",
-            "quantization": hw.get("recommended_quantization", "FP32"),
+            "device": self.device,
+            "quantization": hw.get("recommended_quantization", "FP16" if "cuda" in self.device else "FP32"),
             "context_window": settings.get("context_window", 8192),
             "status": "Ready" if self.is_available() else "Unavailable",
-            "vram_allocated_mb": hw["gpu"].get("vram_used_mb", 0),
+            "vram_allocated_mb": vram_used,
             "training_date": self.metadata.get("timestamp", "N/A"),
             "final_loss": self.metadata.get("final_loss", "N/A"),
+            "validation_loss": self.metadata.get("validation_loss", "N/A"),
             "steps_completed": self.metadata.get("steps_completed", 0)
         }
 
@@ -135,7 +156,7 @@ class MayaCheckpointProvider(BaseModelProvider):
         else:
             formatted = f"<|im_start|>system\n{sys_p}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
-        inputs = self.tokenizer(formatted, return_tensors="pt")
+        inputs = self.tokenizer(formatted, return_tensors="pt").to(self.device)
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
 
         generation_kwargs = dict(
@@ -194,6 +215,43 @@ class OllamaProvider(BaseModelProvider):
                     chunk = json.loads(line.decode("utf-8"))
                     yield chunk.get("response", "")
 
+class MayaModelManager:
+    """
+    Manages model lifecycle, health monitoring, memory usage, and warm-up checks.
+    States: NOT_INSTALLED, LOADING, READY, FAILED.
+    """
+    def __init__(self, provider: BaseModelProvider):
+        self.provider = provider
+        self.state: str = "NOT_INSTALLED"
+        self._update_state()
+
+    def _update_state(self):
+        if self.provider.is_available():
+            self.state = "READY"
+        else:
+            self.state = "NOT_INSTALLED"
+
+    def warm_up(self) -> bool:
+        """Warms up the model with a minimal prompt."""
+        if not self.provider.is_available():
+            return False
+        try:
+            self.state = "LOADING"
+            res = self.provider.generate("Ping", system_prompt="Respond 'pong'.", max_new_tokens=5)
+            self.state = "READY"
+            return bool(res)
+        except Exception as e:
+            print(f"[MayaModelManager] Warm-up failed: {e}")
+            self.state = "FAILED"
+            return False
+
+    def health_check(self) -> Dict[str, Any]:
+        self._update_state()
+        return {
+            "status": self.state,
+            "provider_info": self.provider.get_info()
+        }
+
 class MayaModelRuntime:
     """
     Central model runtime. Chooses between MayaCheckpointProvider (default local),
@@ -203,6 +261,7 @@ class MayaModelRuntime:
         self.maya_provider = MayaCheckpointProvider()
         self.ollama_provider = OllamaProvider()
         self.active_provider: BaseModelProvider = self.maya_provider
+        self.manager = MayaModelManager(self.active_provider)
 
     def get_status(self) -> Dict[str, Any]:
         info = self.active_provider.get_info()
@@ -210,6 +269,7 @@ class MayaModelRuntime:
         info["gpu_model"] = hw["gpu"]["name"]
         info["gpu_available"] = hw["gpu"]["available"]
         info["offline_mode"] = settings.get("offline_only", True)
+        info["lifecycle_state"] = self.manager.state
         return info
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None, **kwargs) -> str:

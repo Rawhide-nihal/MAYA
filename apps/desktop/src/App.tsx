@@ -39,8 +39,9 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Poll live telemetry
+  // Poll live telemetry and bootstrap session token
   useEffect(() => {
+    MayaApi.bootstrapToken();
     fetchTelemetry();
     const interval = setInterval(fetchTelemetry, 3500);
     return () => clearInterval(interval);

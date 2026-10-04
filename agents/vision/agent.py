@@ -48,12 +48,17 @@ class VisionAgent:
             screenshot = None
             try:
                 screenshot = ImageGrab.grab()
-            except Exception:
-                pass
+            except Exception as grab_err:
+                return {
+                    "success": False,
+                    "error": f"Failed to capture desktop display: {grab_err}"
+                }
 
             if screenshot is None:
-                from PIL import Image
-                screenshot = Image.new("RGB", (1920, 1080), color=(15, 23, 42))
+                return {
+                    "success": False,
+                    "error": "Failed to capture desktop display: No active display surface detected."
+                }
 
             timestamp = int(time.time())
             filename = f"maya_screen_{timestamp}.png"
