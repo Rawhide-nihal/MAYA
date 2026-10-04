@@ -1,0 +1,27 @@
+# MAYA AI Desktop Companion — Core Dependencies
+# Production Phase 2
+
+# Backend & Web Server
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Windows System Telemetry & OS Automation
+psutil>=5.9.0
+pywin32>=306; sys_platform == 'win32'
+pyperclip>=1.8.2
+pillow>=10.0.0
+
+# Local Voice Engine
+pyttsx3>=2.90
+
+# Machine Learning & LoRA Training Stack
+numpy>=1.26.0
+safetensors>=0.4.0
+transformers>=4.38.0
+
+# Optional PyTorch Acceleration (Install matching your CUDA version from https://pytorch.org)
+# torch>=2.2.0
+
+# HTTP & Web Inspection
+requests>=2.31.0
+urllib3>=2.0.0

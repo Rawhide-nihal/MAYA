@@ -107,6 +107,16 @@ class DeterministicIntentClassifier:
         cleaned = text.strip()
         lower = cleaned.lower()
 
+        # Check for Critical Destructive Actions
+        if any(w in lower for w in ["format", "format my", "destroy", "wipe"]) or ("delete" in lower and any(term in lower for term in ["permanently", "entire", "all my", "c:"])):
+            return {
+                "intent": "CRITICAL_ACTION",
+                "tool": "delete_file",
+                "arguments": {"target": cleaned},
+                "confidence": 0.99,
+                "summary": "Critical destructive operation requested (requires Level 4 explicit authorization)"
+            }
+
         # Check for Undo
         if re.search(r"\b(undo|rollback|revert)\b", lower):
             return {
@@ -169,13 +179,23 @@ class DeterministicIntentClassifier:
             }
 
         # Conversational / Greetings
-        if any(greeting in lower for greeting in ["hey maya", "hello maya", "hi maya", "maya", "hello", "hi there", "how are you", "who are you"]):
+        if any(greeting in lower for greeting in ["hey maya", "hello maya", "hi maya", "maya", "hello", "hi there", "how are you"]):
             return {
                 "intent": "CHAT",
                 "tool": None,
                 "arguments": {},
                 "confidence": 0.99,
                 "summary": "Conversational greeting or dialogue"
+            }
+
+        # Question intent
+        if lower.startswith("who ") or lower.startswith("what is ") or lower.startswith("can you ") or lower.startswith("how do ") or lower.endswith("?"):
+            return {
+                "intent": "QUESTION",
+                "tool": None,
+                "arguments": {"query": cleaned},
+                "confidence": 0.95,
+                "summary": "User informational inquiry or question"
             }
 
         # Suggestion / Complaining (e.g. "I hate how slow Chrome has become")

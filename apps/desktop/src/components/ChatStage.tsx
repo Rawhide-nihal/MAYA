@@ -7,7 +7,10 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  ShieldAlert,
+  X,
+  Play
 } from 'lucide-react';
 import { MayaCoreCanvas } from './MayaCoreCanvas';
 import { MayaApi, ChatResponse } from '../services/api';
@@ -20,116 +23,207 @@ export interface ChatMessage {
   waveform?: boolean;
   details?: any;
   tasks?: any[];
+  requiresConfirmation?: boolean;
+  confirmationId?: string;
+  confirmationHandled?: boolean;
 }
 
-export const ChatStage: React.FC = () => {
+interface ChatStageProps {
+  coreState?: 'IDLE' | 'LISTENING' | 'UNDERSTANDING' | 'THINKING' | 'PLANNING' | 'EXECUTING' | 'VERIFYING' | 'SPEAKING' | 'SUCCESS' | 'WARNING' | 'ERROR';
+  subState?: 'ANALYZE' | 'PLAN' | 'EXECUTE' | 'VERIFY';
+  statusText?: string;
+  audioAmplitude?: number;
+  onTasksUpdate?: (tasks: any[]) => void;
+  onActionCompleted?: () => void;
+}
+
+export const ChatStage: React.FC<ChatStageProps> = ({
+  coreState: externalCoreState,
+  subState: externalSubState,
+  statusText: externalStatusText,
+  audioAmplitude = 0,
+  onTasksUpdate,
+  onActionCompleted
+}) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
-      id: 'msg-1',
-      sender: 'user',
-      text: 'Hey Maya, can you open VS Code and check if my project has any errors?',
-      time: '10:24 AM'
-    },
-    {
-      id: 'msg-2',
+      id: 'welcome',
       sender: 'maya',
-      text: "Sure! I'll open VS Code, scan your project, and check for any errors. Give me a moment...",
-      time: '10:24 AM',
-      waveform: true
-    },
-    {
-      id: 'msg-3',
-      sender: 'maya',
-      text: "VS Code is now open and I've scanned your project. I found 2 minor issues. Here's what I found:",
-      time: '10:25 AM',
-      details: {
-        issues: [
-          { severity: 'minor', file: 'package.json', message: 'No build or test scripts defined in package.json.' },
-          { severity: 'minor', file: 'pyproject.toml', message: 'Missing tool.poetry configuration section.' }
-        ]
-      }
+      text: "Hello! I'm MAYA, your personal AI desktop companion. I have full local awareness of your PC, active projects, and system health. How can I assist you today?",
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      waveform: false
     }
   ]);
 
   const [inputMessage, setInputMessage] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [coreState, setCoreState] = useState<'IDLE' | 'LISTENING' | 'THINKING' | 'EXECUTING' | 'RESPONDING'>('EXECUTING');
-  const [subState, setSubState] = useState<'ANALYZE' | 'PLAN' | 'EXECUTE' | 'VERIFY'>('EXECUTE');
-  const [statusText, setStatusText] = useState('Working on it...');
+  const [internalCoreState, setInternalCoreState] = useState<'IDLE' | 'LISTENING' | 'UNDERSTANDING' | 'THINKING' | 'PLANNING' | 'EXECUTING' | 'VERIFYING' | 'SPEAKING' | 'SUCCESS' | 'WARNING' | 'ERROR'>('IDLE');
+  const [internalSubState, setInternalSubState] = useState<'ANALYZE' | 'PLAN' | 'EXECUTE' | 'VERIFY'>('ANALYZE');
+  const [internalStatusText, setInternalStatusText] = useState('Ready for your command.');
   const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Sync external props if provided
+  const activeCoreState = externalCoreState || internalCoreState;
+  const activeSubState = externalSubState || internalSubState;
+  const activeStatusText = externalStatusText || internalStatusText;
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, activeStatusText]);
 
   const toggleDetails = (id: string) => {
     setExpandedDetails(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const handleSend = async () => {
-    if (!inputMessage.trim() || isProcessing) return;
+  const handleSend = async (textToSend?: string, permissionToken?: string) => {
+    const text = textToSend || inputMessage.trim();
+    if (!text || isProcessing) return;
 
-    const userText = inputMessage.trim();
-    setInputMessage('');
+    if (!textToSend) {
+      setInputMessage('');
+    }
+
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // Add user message
-    const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
-      sender: 'user',
-      text: userText,
-      time: timeStr
-    };
-    setMessages(prev => [...prev, userMsg]);
+    // Add user message if new
+    if (!textToSend) {
+      const userMsg: ChatMessage = {
+        id: `user-${Date.now()}`,
+        sender: 'user',
+        text,
+        time: timeStr
+      };
+      setMessages(prev => [...prev, userMsg]);
+    }
 
-    // Update Maya core to THINKING -> EXECUTING
     setIsProcessing(true);
-    setCoreState('THINKING');
-    setSubState('PLAN');
-    setStatusText('Planning execution...');
+    setInternalCoreState('THINKING');
+    setInternalSubState('PLAN');
+    setInternalStatusText('Formulating plan...');
 
     try {
-      setTimeout(() => {
-        setCoreState('EXECUTING');
-        setSubState('EXECUTE');
-        setStatusText('Executing requested task...');
-      }, 700);
+      const resp: ChatResponse = await MayaApi.sendChatMessage(text, permissionToken);
 
-      const resp = await MayaApi.sendChatMessage(userText);
+      if (resp.tasks && resp.tasks.length > 0) {
+        onTasksUpdate?.(resp.tasks);
+      }
 
-      setCoreState('RESPONDING');
-      setSubState('VERIFY');
-      setStatusText('Task verified and complete.');
+      if (resp.requires_confirmation) {
+        setInternalCoreState('WARNING');
+        setInternalStatusText('Authorization required for execution.');
 
-      const mayaMsg: ChatMessage = {
-        id: `maya-${Date.now()}`,
-        sender: 'maya',
-        text: resp.reply,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        details: resp.details,
-        tasks: resp.tasks
-      };
-
-      setMessages(prev => [...prev, mayaMsg]);
-
-      setTimeout(() => {
-        setCoreState('IDLE');
-        setStatusText('Ready for your command.');
+        const confirmMsg: ChatMessage = {
+          id: `maya-confirm-${Date.now()}`,
+          sender: 'maya',
+          text: resp.reply,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          requiresConfirmation: true,
+          confirmationId: resp.confirmation_id,
+          details: resp.details,
+          tasks: resp.tasks
+        };
+        setMessages(prev => [...prev, confirmMsg]);
         setIsProcessing(false);
-      }, 2500);
+        return;
+      }
+
+      setInternalCoreState('EXECUTING');
+      setInternalSubState('EXECUTE');
+      setInternalStatusText('Executing & verifying...');
+
+      setTimeout(() => {
+        setInternalCoreState('SUCCESS');
+        setInternalSubState('VERIFY');
+        setInternalStatusText('Verified and complete.');
+
+        const mayaMsg: ChatMessage = {
+          id: `maya-${Date.now()}`,
+          sender: 'maya',
+          text: resp.reply,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          details: resp.details,
+          tasks: resp.tasks,
+          waveform: true
+        };
+
+        setMessages(prev => [...prev, mayaMsg]);
+        onActionCompleted?.();
+
+        setTimeout(() => {
+          setInternalCoreState('IDLE');
+          setInternalStatusText('Ready for your command.');
+          setIsProcessing(false);
+        }, 2200);
+      }, 500);
 
     } catch (err: any) {
-      setCoreState('IDLE');
-      setStatusText('Error connecting to Maya Core.');
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Service error.');
       setIsProcessing(false);
       setMessages(prev => [
         ...prev,
         {
           id: `maya-err-${Date.now()}`,
           sender: 'maya',
-          text: `I encountered an issue connecting to my core service: ${err.message || 'Check if maya_server.py is running.'}`,
+          text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         }
       ]);
+    }
+  };
+
+  const handleConfirmAction = async (msgId: string, confirmationId: string, approved: boolean) => {
+    // Mark confirmation handled in UI
+    setMessages(prev =>
+      prev.map(m => (m.id === msgId ? { ...m, confirmationHandled: true } : m))
+    );
+
+    if (!approved) {
+      try {
+        await MayaApi.confirmAction(confirmationId, false);
+      } catch (e) {
+        console.error(e);
+      }
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `maya-denied-${Date.now()}`,
+          sender: 'maya',
+          text: 'Understood. The action was denied and cancelled.',
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ]);
+      setInternalCoreState('IDLE');
+      setInternalStatusText('Action denied by user.');
+      return;
+    }
+
+    // Approved: fetch token and execute
+    try {
+      setInternalCoreState('EXECUTING');
+      setInternalStatusText('Executing authorized action...');
+      const res = await MayaApi.confirmAction(confirmationId, true);
+      if (res.success && res.permission_token) {
+        // Re-execute with permission token
+        await handleSend('Proceed with confirmed action', res.permission_token);
+      } else {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `maya-fail-${Date.now()}`,
+            sender: 'maya',
+            text: 'Authorization token could not be verified.',
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }
+        ]);
+        setInternalCoreState('ERROR');
+      }
+    } catch (err: any) {
+      setInternalCoreState('ERROR');
+      setInternalStatusText(`Authorization error: ${err.message}`);
     }
   };
 
@@ -143,12 +237,11 @@ export const ChatStage: React.FC = () => {
     <div className="flex-1 h-full flex flex-col justify-between px-6 py-4 overflow-hidden relative">
       {/* Scrollable Conversation Stream */}
       <div className="flex-1 overflow-y-auto space-y-4 pr-2">
-        {/* User Message 1 */}
         {messages.map((msg) => {
           if (msg.sender === 'user') {
             return (
               <div key={msg.id} className="flex items-start space-x-3 max-w-xl">
-                <div className="w-8 h-8 rounded-full bg-slate-800/80 border border-slate-700/60 flex items-center justify-center text-slate-300 mt-1">
+                <div className="w-8 h-8 rounded-full bg-slate-800/80 border border-slate-700/60 flex items-center justify-center text-slate-300 mt-1 shrink-0">
                   <UserIcon size={15} />
                 </div>
                 <div className="flex-1">
@@ -173,9 +266,38 @@ export const ChatStage: React.FC = () => {
 
               <div className="flex-1">
                 <div className="p-3.5 rounded-2xl glass-panel text-slate-100 text-[13px] leading-relaxed border border-blue-500/25 shadow-[0_0_15px_rgba(37,99,235,0.1)]">
-                  <p>{msg.text}</p>
+                  <p className="whitespace-pre-wrap">{msg.text}</p>
 
-                  {/* Optional Voice Waveform inside bubble (Matching Reference Image) */}
+                  {/* Interactive Permission Authorization Card */}
+                  {msg.requiresConfirmation && !msg.confirmationHandled && msg.confirmationId && (
+                    <div className="mt-3 p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/50 space-y-2.5">
+                      <div className="flex items-center space-x-2 text-amber-300 font-semibold text-xs">
+                        <ShieldAlert size={15} className="text-amber-400 shrink-0" />
+                        <span>Security Confirmation Required</span>
+                      </div>
+                      <p className="text-[11px] text-slate-300">
+                        This action modifies files, terminates processes, or runs privileged commands on your system.
+                      </p>
+                      <div className="flex items-center space-x-2 pt-1">
+                        <button
+                          onClick={() => handleConfirmAction(msg.id, msg.confirmationId!, true)}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md flex items-center space-x-1.5 transition-colors cursor-pointer"
+                        >
+                          <CheckCircle2 size={13} />
+                          <span>Authorize Once</span>
+                        </button>
+                        <button
+                          onClick={() => handleConfirmAction(msg.id, msg.confirmationId!, false)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-colors cursor-pointer"
+                        >
+                          <X size={13} />
+                          <span>Deny</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Optional Voice Waveform inside bubble */}
                   {msg.waveform && (
                     <div className="flex items-center space-x-1 mt-2.5 pt-2 border-t border-slate-700/40">
                       {[12, 18, 28, 16, 24, 32, 20, 14, 26, 30, 18, 12].map((height, i) => (
@@ -188,33 +310,32 @@ export const ChatStage: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Show Details Accordion for diagnostics (Matching Reference Image) */}
+                  {/* Diagnostic / Task Details Accordion */}
                   {msg.details && (
                     <div className="mt-2.5 pt-2 border-t border-slate-700/40">
                       <button
                         onClick={() => toggleDetails(msg.id)}
-                        className="flex items-center space-x-1.5 text-xs text-cyan-400 hover:text-cyan-300 font-medium px-2 py-1 rounded-lg bg-blue-950/40 border border-blue-500/20"
+                        className="flex items-center space-x-1.5 text-xs text-cyan-400 hover:text-cyan-300 font-medium px-2 py-1 rounded-lg bg-blue-950/40 border border-blue-500/20 cursor-pointer"
                       >
                         <span>Show Details</span>
                         {expandedDetails[msg.id] ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                       </button>
 
                       {expandedDetails[msg.id] && (
-                        <div className="mt-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1.5 text-xs">
+                        <div className="mt-2 p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1.5 text-xs font-mono">
                           {msg.details.issues && msg.details.issues.length > 0 ? (
                             msg.details.issues.map((iss: any, idx: number) => (
                               <div key={idx} className="flex items-start space-x-2 text-slate-300">
                                 <AlertTriangle size={13} className="text-amber-400 shrink-0 mt-0.5" />
                                 <div>
-                                  <span className="font-semibold text-white">{iss.file}:</span> {iss.message}
+                                  <span className="font-semibold text-white">{iss.file || iss.title}:</span> {iss.message || iss.description}
                                 </div>
                               </div>
                             ))
                           ) : (
-                            <div className="flex items-center space-x-2 text-emerald-400">
-                              <CheckCircle2 size={13} />
-                              <span>Workspace verified. All checks passing.</span>
-                            </div>
+                            <pre className="text-[11px] text-slate-300 overflow-x-auto">
+                              {JSON.stringify(msg.details, null, 2)}
+                            </pre>
                           )}
                         </div>
                       )}
@@ -229,23 +350,24 @@ export const ChatStage: React.FC = () => {
           );
         })}
 
-        {/* Central MAYA Core Canvas Display (Replicating Reference Center) */}
+        {/* Central MAYA Core Canvas Display */}
         <div className="my-2">
           <MayaCoreCanvas
-            state={coreState}
-            subState={subState}
-            statusText={statusText}
+            state={activeCoreState}
+            subState={activeSubState}
+            statusText={activeStatusText}
+            audioAmplitude={audioAmplitude}
           />
         </div>
 
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Bottom Floating Input Bar (Matching Reference Image) */}
+      {/* Bottom Floating Input Bar */}
       <div className="pt-2">
         <div className="relative flex items-center px-4 py-2.5 rounded-full glass-panel border border-cyan-500/30 shadow-[0_0_25px_rgba(34,211,238,0.15)] bg-[#0a1224]/80">
           {/* Paperclip attachment */}
-          <button className="text-slate-400 hover:text-slate-200 transition-colors mr-3 p-1">
+          <button className="text-slate-400 hover:text-slate-200 transition-colors mr-3 p-1 cursor-pointer">
             <Paperclip size={18} />
           </button>
 
@@ -255,12 +377,12 @@ export const ChatStage: React.FC = () => {
             value={inputMessage}
             onChange={(e) => setInputMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message Maya..."
+            placeholder="Message Maya... (e.g. 'Open VS Code', 'Check my project', 'Check system diagnostics')"
             className="flex-1 bg-transparent border-none outline-none text-slate-100 placeholder-slate-400 text-sm font-normal"
           />
 
           {/* Microphone */}
-          <button className="text-slate-400 hover:text-cyan-400 transition-colors mx-2 p-1">
+          <button className="text-slate-400 hover:text-cyan-400 transition-colors mx-2 p-1 cursor-pointer">
             <Mic size={18} />
           </button>
 
@@ -272,9 +394,9 @@ export const ChatStage: React.FC = () => {
             <span className="w-0.5 h-4 bg-cyan-400 rounded-full" />
           </div>
 
-          {/* Send Button: Glowing Electric Blue Circle with Arrow Up */}
+          {/* Send Button */}
           <button
-            onClick={handleSend}
+            onClick={() => handleSend()}
             disabled={!inputMessage.trim() || isProcessing}
             className={`w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 ml-1 ${
               inputMessage.trim() && !isProcessing
@@ -289,3 +411,4 @@ export const ChatStage: React.FC = () => {
     </div>
   );
 };
+export default ChatStage;

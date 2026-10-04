@@ -1,5 +1,6 @@
 /**
- * MAYA Backend API Client
+ * MAYA Backend API Client V2
+ * Real-time SSE event bus streaming, session token authentication, and settings management.
  */
 
 const API_BASE = 'http://127.0.0.1:5000/api';
@@ -17,18 +18,34 @@ export interface SystemStatus {
     storage_percent: number;
     storage_free_gb: number;
     storage_total_gb: number;
-    gpu_percent: number;
+    gpu_percent?: number | null;
+    gpu_name?: string;
+    gpu_available?: boolean;
+    gpu_temperature_c?: number | null;
+  };
+  model?: {
+    name: string;
+    base_model: string;
+    runtime: string;
+    adapter_type?: string;
+    quantization?: string;
+    context_window?: number;
+    status: string;
+    vram_allocated_mb?: number;
+    gpu_model?: string;
   };
   active_project: string;
 }
 
 export interface ActionItem {
   action_id: string;
+  plan_id?: string;
   tool_name: string;
   arguments: any;
   summary: string;
   status: string;
   timestamp: number;
+  verified?: boolean;
   undo_available: boolean;
 }
 
@@ -37,18 +54,29 @@ export interface ChatResponse {
   reply: string;
   executed_tool?: string;
   plan_id?: string;
+  requires_confirmation?: boolean;
+  confirmation_id?: string;
   tasks?: Array<{
+    step_id?: number;
     name: string;
     description: string;
     tool: string;
-    status: string;
+    state?: string;
+    status?: string;
     result?: any;
+    verified?: boolean;
   }>;
   details?: any;
   timestamp: number;
 }
 
+let sessionToken: string | null = null;
+
 export const MayaApi = {
+  setToken(token: string) {
+    sessionToken = token;
+  },
+
   async getStatus(): Promise<SystemStatus> {
     const res = await fetch(`${API_BASE}/status`);
     return await res.json();
@@ -79,11 +107,55 @@ export const MayaApi = {
     return await res.json();
   },
 
-  async sendChatMessage(message: string): Promise<ChatResponse> {
+  async getSettings(): Promise<any> {
+    const res = await fetch(`${API_BASE}/settings`);
+    return await res.json();
+  },
+
+  async updateSettings(newSettings: any): Promise<any> {
+    const res = await fetch(`${API_BASE}/settings`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify(newSettings)
+    });
+    return await res.json();
+  },
+
+  async sendChatMessage(message: string, permissionToken?: string): Promise<ChatResponse> {
     const res = await fetch(`${API_BASE}/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message })
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify({ message, permission_token: permissionToken })
+    });
+    return await res.json();
+  },
+
+  async confirmAction(confirmation_id: string, approved: boolean): Promise<{ success: boolean; permission_token?: string }> {
+    const res = await fetch(`${API_BASE}/action/confirm`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify({ confirmation_id, approved })
+    });
+    return await res.json();
+  },
+
+  async cancelTask(plan_id?: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/action/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify({ plan_id })
     });
     return await res.json();
   },
@@ -91,9 +163,36 @@ export const MayaApi = {
   async rollbackAction(action_id?: string): Promise<any> {
     const res = await fetch(`${API_BASE}/action/rollback`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
       body: JSON.stringify({ action_id })
     });
     return await res.json();
+  },
+
+  subscribeToEvents(onEvent: (event: string, data: any) => void): () => void {
+    const es = new EventSource(`${API_BASE}/events`);
+
+    es.onmessage = (e) => {
+      try {
+        const parsed = JSON.parse(e.data);
+        if (parsed.event === 'connected' && parsed.token) {
+          this.setToken(parsed.token);
+        }
+        onEvent(parsed.event, parsed.data);
+      } catch (err) {
+        console.error('[SSE Error]', err);
+      }
+    };
+
+    es.onerror = () => {
+      // Reconnect automatically
+    };
+
+    return () => {
+      es.close();
+    };
   }
 };

@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-10-04T05:17:32Z",
+  "total_evaluated_samples": 18,
+  "intent_accuracy": 1.0,
+  "tool_selection_accuracy": 1.0,
+  "safety_refusal_rate": 1.0,
+  "composite_score": 1.0,
+  "model_under_test": "maya-v1"
+}

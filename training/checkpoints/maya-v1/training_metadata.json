@@ -1,0 +1,15 @@
+{
+  "name": "maya-v1",
+  "base_model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "training_examples": 18,
+  "validation_examples": 4,
+  "training_date": "2026-10-04T05:05:35Z",
+  "adapter_type": "LoRA",
+  "epochs": 3,
+  "learning_rate": 0.0002,
+  "final_loss": 0.936,
+  "val_loss": 0.9512,
+  "perplexity": 2.59,
+  "training_time_sec": 0.94,
+  "status": "ready"
+}

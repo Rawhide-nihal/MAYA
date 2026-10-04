@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maya-desktop"
+version = "2.0.0"
+description = "MAYA — Personal AI Desktop Companion & Autonomous Windows Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0.0",
+    "flask-cors>=4.0.0",
+    "psutil>=5.9.0",
+    "pywin32>=306; sys_platform == 'win32'",
+    "pyperclip>=1.8.2",
+    "pillow>=10.0.0",
+    "pyttsx3>=2.90",
+    "numpy>=1.26.0",
+    "safetensors>=0.4.0",
+    "transformers>=4.38.0",
+    "requests>=2.31.0"
+]
+
+[project.scripts]
+maya = "start_maya:main"
+maya-server = "maya_server:main"
+maya-train = "training.finetuning.train_lora:main"
+maya-eval = "training.evaluation.eval_suite:main"
