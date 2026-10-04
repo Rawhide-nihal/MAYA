@@ -36,70 +36,125 @@ class BaseModelProvider(ABC):
 
 class MayaCheckpointProvider(BaseModelProvider):
     """
-    Loads and serves the trained MAYA LoRA checkpoint (maya-v1) from safetensors.
-    Provides verified local inference with domain instruction grounding.
+    Loads and serves the trained MAYA LoRA checkpoint (maya-v1) via PyTorch and PEFT.
+    Provides verified local inference with real autoregressive token generation.
+    Zero hardcoded responses.
     """
     def __init__(self, checkpoint_dir: Optional[Path] = None):
-        self.checkpoint_dir = checkpoint_dir or CHECKPOINTS_DIR
+        self.checkpoint_dir = Path(checkpoint_dir or CHECKPOINTS_DIR)
         self.metadata: Dict[str, Any] = {}
-        self.adapter_weights: Optional[Dict[str, Any]] = None
-        self._load()
+        self.tokenizer = None
+        self.model = None
+        self.base_model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+        self._load_metadata()
 
-    def _load(self):
+    def _load_metadata(self):
         meta_file = self.checkpoint_dir / "training_metadata.json"
-        weights_file = self.checkpoint_dir / "adapter_model.safetensors"
-        if meta_file.exists() and weights_file.exists():
+        if meta_file.exists():
             try:
                 with open(meta_file, "r", encoding="utf-8") as f:
                     self.metadata = json.load(f)
-                self.adapter_weights = safetensors.numpy.load_file(str(weights_file))
+                self.base_model_name = self.metadata.get("base_model", "Qwen/Qwen2.5-0.5B-Instruct")
             except Exception as e:
-                print(f"[MayaCheckpointProvider] Error loading weights: {e}")
+                print(f"[MayaCheckpointProvider] Error reading metadata: {e}")
+
+    def _ensure_model_loaded(self) -> bool:
+        if self.model is not None and self.tokenizer is not None:
+            return True
+        try:
+            weights_file = self.checkpoint_dir / "adapter_model.safetensors"
+            if not weights_file.exists():
+                return False
+
+            import torch
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            from peft import PeftModel
+
+            self.tokenizer = AutoTokenizer.from_pretrained(str(self.checkpoint_dir), trust_remote_code=True)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                self.base_model_name,
+                torch_dtype=torch.float32,
+                device_map="cpu",
+                trust_remote_code=True
+            )
+            self.model = PeftModel.from_pretrained(base_model, str(self.checkpoint_dir))
+            self.model.eval()
+            print(f"[MayaCheckpointProvider] Successfully loaded maya-v1 PEFT adapter on {self.base_model_name}")
+            return True
+        except Exception as e:
+            print(f"[MayaCheckpointProvider] Failed to load neural weights: {e}")
+            return False
 
     def is_available(self) -> bool:
-        return self.adapter_weights is not None
+        weights_file = self.checkpoint_dir / "adapter_model.safetensors"
+        return weights_file.exists()
 
     def get_info(self) -> Dict[str, Any]:
         hw = get_hardware_profile()
         return {
-            "name": self.metadata.get("name", "maya-v1"),
-            "base_model": self.metadata.get("base_model", "Qwen/Qwen2.5-Coder-1.5B-Instruct"),
-            "runtime": "Local (Safetensors / LoRA)",
-            "adapter_type": self.metadata.get("adapter_type", "LoRA"),
-            "quantization": hw.get("recommended_quantization", "Q4_K_M"),
+            "name": self.metadata.get("adapter_name", "maya-v1"),
+            "base_model": self.base_model_name,
+            "runtime": "Local (PyTorch / PEFT LoRA)",
+            "adapter_type": "LoRA",
+            "quantization": hw.get("recommended_quantization", "FP32"),
             "context_window": settings.get("context_window", 8192),
             "status": "Ready" if self.is_available() else "Unavailable",
             "vram_allocated_mb": hw["gpu"].get("vram_used_mb", 0),
-            "training_date": self.metadata.get("training_date", "N/A")
+            "training_date": self.metadata.get("timestamp", "N/A"),
+            "final_loss": self.metadata.get("final_loss", "N/A"),
+            "steps_completed": self.metadata.get("steps_completed", 0)
         }
 
     def generate(self, prompt: str, system_prompt: Optional[str] = None, **kwargs) -> str:
         chunks = list(self.stream_generate(prompt, system_prompt, **kwargs))
-        return "".join(chunks)
+        return "".join(chunks).strip()
 
     def stream_generate(self, prompt: str, system_prompt: Optional[str] = None, **kwargs) -> Generator[str, None, None]:
-        # Formulate grounded instruction reply
-        lower = prompt.lower().strip()
+        if not self._ensure_model_loaded():
+            yield "MAYA neural model (maya-v1) is unavailable. Please verify training checkpoint."
+            return
 
-        # Dynamic responses based on grounded fine-tuning domains
-        if "hate how slow" in lower or "chrome is slow" in lower:
-            reply = "Want me to check what is making Chrome slow? I can inspect memory usage and background processes."
-        elif "hey maya" in lower or "hello" in lower or "hi maya" in lower:
-            reply = "Hey there! How can I help you with your PC or projects today?"
-        elif "how are you" in lower:
-            reply = "All my core systems are running smoothly and nominal. What are we working on?"
-        elif "who are you" in lower:
-            reply = "I'm MAYA, your personal AI desktop companion. I assist with PC control, development diagnostics, system performance, and your ongoing projects."
-        elif "what can you do" in lower or "help me" in lower:
-            reply = "I can inspect and control applications like VS Code, run system diagnostics, check your code for errors, search and manage files, and remember your preferences across sessions."
+        import torch
+        from transformers import TextIteratorStreamer
+        from threading import Thread
+
+        sys_p = system_prompt or "You are MAYA, a helpful, intelligent personal AI desktop companion."
+        messages = [
+            {"role": "system", "content": sys_p},
+            {"role": "user", "content": prompt}
+        ]
+
+        if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template:
+            try:
+                formatted = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except Exception:
+                formatted = f"<|im_start|>system\n{sys_p}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         else:
-            reply = "I understand. Let me know if you would like me to inspect your workspace, run diagnostics, or assist with anything on your PC."
+            formatted = f"<|im_start|>system\n{sys_p}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
-        # Simulate streaming token by token
-        tokens = reply.split(" ")
-        for i, token in enumerate(tokens):
-            yield token + (" " if i < len(tokens) - 1 else "")
-            time.sleep(0.015)
+        inputs = self.tokenizer(formatted, return_tensors="pt")
+        streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+
+        generation_kwargs = dict(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+            streamer=streamer,
+            max_new_tokens=kwargs.get("max_new_tokens", 160),
+            temperature=kwargs.get("temperature", 0.7),
+            top_p=kwargs.get("top_p", 0.9),
+            do_sample=kwargs.get("do_sample", True),
+            pad_token_id=self.tokenizer.pad_token_id
+        )
+
+        thread = Thread(target=self.model.generate, kwargs=generation_kwargs)
+        thread.start()
+
+        for chunk in streamer:
+            if chunk:
+                yield chunk
 
 class OllamaProvider(BaseModelProvider):
     """Local inference via Ollama REST API."""

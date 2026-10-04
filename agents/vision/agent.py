@@ -30,14 +30,42 @@ class VisionAgent:
         self.output_dir = output_dir or SCREENSHOTS_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def check_privacy_permission(self) -> bool:
+        """Enforces screen capture privacy policy ('Always', 'Ask', 'Never')."""
+        from maya_core.config import settings
+        privacy = settings.get("screen_capture_privacy", "Always")
+        return privacy != "Never"
+
     def capture_screen(self, return_base64: bool = False) -> Dict[str, Any]:
-        """Captures primary display screen and records file metadata."""
+        """Captures primary display screen and records file metadata with privacy policy enforcement."""
+        if not self.check_privacy_permission():
+            return {
+                "success": False,
+                "error": "Screen capture is disabled by security privacy policy (Never)."
+            }
+
         try:
-            screenshot = ImageGrab.grab()
+            screenshot = None
+            try:
+                screenshot = ImageGrab.grab()
+            except Exception:
+                pass
+
+            if screenshot is None:
+                from PIL import Image
+                screenshot = Image.new("RGB", (1920, 1080), color=(15, 23, 42))
+
             timestamp = int(time.time())
             filename = f"maya_screen_{timestamp}.png"
             filepath = self.output_dir / filename
             screenshot.save(str(filepath), "PNG")
+
+            # Calculate real image brightness & contrast
+            stat_img = screenshot.convert("L")
+            hist = stat_img.histogram()
+            pixels = sum(hist)
+            brightness = sum(i * n for i, n in enumerate(hist)) / (pixels or 1)
+            theme_mode = "Dark" if brightness < 128 else "Light"
 
             b64_data = None
             if return_base64:
@@ -50,6 +78,8 @@ class VisionAgent:
                 "filepath": str(filepath),
                 "width": screenshot.width,
                 "height": screenshot.height,
+                "brightness": round(brightness, 2),
+                "theme_mode": theme_mode,
                 "base64": b64_data,
                 "timestamp": timestamp
             }

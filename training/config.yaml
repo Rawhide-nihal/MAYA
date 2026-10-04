@@ -1,0 +1,44 @@
+# MAYA AI Desktop Companion — Training Configuration
+# Phase 3 Real LoRA / PEFT Training Pipeline
+
+base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+dataset:
+  train_file: "training/datasets/train.jsonl"
+  val_file: "training/datasets/val.jsonl"
+  test_file: "training/datasets/test.jsonl"
+
+training:
+  epochs: 3
+  learning_rate: 2.0e-4
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  sequence_length: 512
+  optimizer: "adamw_torch"
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  logging_steps: 10
+  save_strategy: "epoch"
+  evaluation_strategy: "epoch"
+
+lora:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+hardware:
+  device: "auto"              # cuda if available, else cpu with fallback
+  fp16: false
+  bf16: false
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+
+output:
+  output_directory: "training/checkpoints/maya-v1"
+  adapter_name: "maya-v1"

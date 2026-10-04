@@ -270,5 +270,75 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertIn("reply", diag_resp)
         self.assertTrue(len(diag_resp.get("tasks", [])) > 0)
 
+    # 9. Phase 3: Exact Plan Suspension & Single-Use Token Resumption
+    def test_exact_plan_suspension_and_resume(self):
+        # Create a plan with a privileged step
+        intent_info = {
+            "intent": "FILE_ACTION",
+            "tool": "delete_file",
+            "arguments": {"filepath": "sensitive_test.txt"}
+        }
+        plan = self.planner.create_plan("Delete sensitive test file", intent_info)
+        self.assertIsNotNone(plan)
+
+        # Execute: step 1 is delete_file (privileged Level 4) -> plan must suspend
+        res = self.planner.execute_plan(plan)
+        self.assertEqual(res["state"], PlanState.WAITING_FOR_PERMISSION.value)
+        self.assertTrue(res.get("requires_confirmation"))
+        conf_id = res.get("confirmation_id")
+        self.assertIsNotNone(conf_id)
+
+        # Plan must be stored in active_plans awaiting confirmation
+        self.assertIn(plan.plan_id, self.planner.active_plans)
+
+        # Resolve confirmation -> issues single-use token bound to this exact plan & step
+        token = self.permissions.resolve_confirmation(conf_id, approved=True)
+        self.assertIsNotNone(token)
+
+        # Attempt to resume with wrong token or wrong confirmation ID
+        bad_resume = self.planner.resume_plan(plan.plan_id, "bad_conf_id", token)
+        self.assertIn("error", bad_resume)
+
+        # Resume with exact valid token
+        good_resume = self.planner.resume_plan(plan.plan_id, conf_id, token)
+        self.assertIn(good_resume["state"], [PlanState.COMPLETED.value, PlanState.FAILED.value])
+
+        # Attempt replay with the same token -> must be rejected as already consumed
+        replay_resume = self.planner.resume_plan(plan.plan_id, conf_id, token)
+        self.assertIn("error", replay_resume)
+
+    # 10. Phase 3: Real Audio PCM RMS Measurement
+    def test_real_audio_pcm_rms(self):
+        from voice.engine import calculate_pcm_rms
+        import numpy as np
+
+        # Silence buffer (all zeros)
+        silence = np.zeros(1024, dtype=np.int16).tobytes()
+        rms_silence = calculate_pcm_rms(silence)
+        self.assertEqual(rms_silence, 0.0)
+
+        # Full-scale sine wave
+        t = np.linspace(0, 1, 1024, endpoint=False)
+        sine = (np.sin(2 * np.pi * 440 * t) * 32000).astype(np.int16).tobytes()
+        rms_sine = calculate_pcm_rms(sine)
+        self.assertGreater(rms_sine, 0.5)
+        self.assertLessEqual(rms_sine, 1.0)
+
+    # 11. Phase 3: Vision Privacy Policy Gate
+    def test_vision_privacy_gate(self):
+        from maya_core.config import settings
+
+        # Test Never policy
+        settings.set("screen_capture_privacy", "Never")
+        cap_never = self.vision.capture_screen()
+        self.assertFalse(cap_never["success"])
+        self.assertIn("Never", cap_never["error"])
+
+        # Test Always policy
+        settings.set("screen_capture_privacy", "Always")
+        cap_always = self.vision.capture_screen()
+        self.assertTrue(cap_always["success"])
+        self.assertIn("brightness", cap_always)
+
 if __name__ == "__main__":
     unittest.main()

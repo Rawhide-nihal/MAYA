@@ -97,6 +97,14 @@ class DynamicTaskPlanner:
         if self.event_callback:
             try:
                 self.event_callback(event_name, payload)
+                aliases = {
+                    "plan.created": "task.plan.created",
+                    "tool.started": "task.step.started",
+                    "tool.completed": "task.step.completed",
+                    "tool.failed": "task.step.failed",
+                }
+                if event_name in aliases:
+                    self.event_callback(aliases[event_name], payload)
             except Exception:
                 pass
 
@@ -241,6 +249,7 @@ class DynamicTaskPlanner:
                 step.requires_permission = True
                 step.confirmation_id = tool_res.get("confirmation_id")
                 plan.state = PlanState.WAITING_FOR_PERMISSION
+                self.active_plans[plan.plan_id] = plan
                 self.emit("permission.requested", {
                     "plan_id": plan.plan_id,
                     "step_id": step.step_id,
@@ -285,6 +294,115 @@ class DynamicTaskPlanner:
             "state": plan.state.value,
             "steps": executed_steps,
             "last_result": last_result
+        }
+
+    def resume_plan(self, plan_id: str, confirmation_id: str, permission_token: str) -> Dict[str, Any]:
+        """Resumes an exact suspended plan at its pending step with single-use permission validation."""
+        if plan_id not in self.active_plans:
+            return {"success": False, "error": f"Plan '{plan_id}' not found in active plans."}
+
+        plan = self.active_plans[plan_id]
+        if plan.state != PlanState.WAITING_FOR_PERMISSION:
+            return {"success": False, "error": f"Plan '{plan_id}' is in state {plan.state}, not waiting for permission."}
+
+        curr_idx = plan.active_step_index
+        if curr_idx >= len(plan.steps):
+            return {"success": False, "error": "Plan active step index out of bounds."}
+
+        step = plan.steps[curr_idx]
+
+        # Strict validation of bound single-use token
+        valid, reason = self.permissions.validate_token_for_resume(
+            token=permission_token,
+            plan_id=plan.plan_id,
+            step_id=step.step_id,
+            tool_name=step.tool,
+            arguments=step.arguments,
+            confirmation_id=confirmation_id
+        )
+        if not valid:
+            self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": False, "error": reason})
+            return {"success": False, "error": reason}
+
+        self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": True, "token": permission_token})
+        self.emit("maya.state.changed", {"state": "EXECUTING", "plan_id": plan.plan_id})
+
+        # Execute the suspended step with verified authorization
+        step.state = StepState.RUNNING
+        self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "name": step.name})
+
+        tool_res = self.execute_tool(step.tool, step.arguments, token=permission_token, plan_id=plan.plan_id)
+        self.permissions.consume_token(permission_token)
+        is_success = tool_res.get("success", True)
+        is_verified = tool_res.get("verified", is_success)
+
+        step.state = StepState.SUCCESS if is_success else StepState.FAILED
+        step.result = tool_res
+        step.verified = is_verified
+        step.completed_at = time.time()
+
+        if not is_success:
+            self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "error": tool_res.get("error")})
+            plan.state = PlanState.FAILED
+            return {"success": False, "plan_id": plan.plan_id, "state": "FAILED", "error": tool_res.get("error")}
+
+        self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool})
+
+        # Continue remaining steps in plan
+        for idx in range(curr_idx + 1, len(plan.steps)):
+            if plan.cancelled:
+                plan.steps[idx].state = StepState.CANCELLED
+                plan.state = PlanState.CANCELLED
+                break
+
+            plan.active_step_index = idx
+            next_step = plan.steps[idx]
+            next_step.state = StepState.RUNNING
+            next_step.started_at = time.time()
+            self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool, "name": next_step.name})
+
+            next_res = self.execute_tool(next_step.tool, next_step.arguments, plan_id=plan.plan_id)
+            if next_res.get("requires_confirmation"):
+                next_step.state = StepState.WAITING
+                next_step.requires_permission = True
+                next_step.confirmation_id = next_res.get("confirmation_id")
+                plan.state = PlanState.WAITING_FOR_PERMISSION
+                self.emit("permission.requested", {
+                    "plan_id": plan.plan_id,
+                    "step_id": next_step.step_id,
+                    "confirmation_id": next_step.confirmation_id
+                })
+                return {
+                    "success": False,
+                    "plan_id": plan.plan_id,
+                    "state": "WAITING_FOR_PERMISSION",
+                    "requires_confirmation": True,
+                    "confirmation_id": next_step.confirmation_id
+                }
+
+            step_ok = next_res.get("success", True)
+            next_step.state = StepState.SUCCESS if step_ok else StepState.FAILED
+            next_step.result = next_res
+            next_step.verified = next_res.get("verified", step_ok)
+            next_step.completed_at = time.time()
+
+            if not step_ok:
+                self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool, "error": next_res.get("error")})
+                plan.state = PlanState.FAILED
+                break
+            self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool})
+
+        if plan.state != PlanState.FAILED and plan.state != PlanState.CANCELLED:
+            plan.state = PlanState.COMPLETED
+            plan.completed_at = time.time()
+            self.emit("task.completed", {"plan_id": plan.plan_id})
+            self.emit("maya.state.changed", {"state": "IDLE", "plan_id": plan.plan_id})
+
+        return {
+            "success": plan.state == PlanState.COMPLETED,
+            "plan_id": plan.plan_id,
+            "state": plan.state.value,
+            "steps": [asdict(s) for s in plan.steps]
         }
 
     def execute_tool(self, tool_name: str, arguments: Dict[str, Any], token: Optional[str] = None, plan_id: str = "direct") -> Dict[str, Any]:

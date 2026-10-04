@@ -148,6 +148,32 @@ export const MayaApi = {
     return await res.json();
   },
 
+  async resumePlan(plan_id: string, confirmation_id: string, permission_token: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/plans/${encodeURIComponent(plan_id)}/resume`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify({ confirmation_id, permission_token })
+    });
+    return await res.json();
+  },
+
+  async bootstrapToken(): Promise<string | null> {
+    try {
+      const res = await fetch(`${API_BASE}/auth/token`);
+      const data = await res.json();
+      if (data.token) {
+        this.setToken(data.token);
+        return data.token;
+      }
+    } catch (e) {
+      console.warn('[Bootstrap token failed]', e);
+    }
+    return null;
+  },
+
   async cancelTask(plan_id?: string): Promise<any> {
     const res = await fetch(`${API_BASE}/action/cancel`, {
       method: 'POST',

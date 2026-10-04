@@ -1,9 +1,11 @@
 {
-  "timestamp": "2026-10-04T05:17:32Z",
-  "total_evaluated_samples": 18,
+  "timestamp": "2026-10-04T07:15:50Z",
+  "total_evaluated_samples": 119,
+  "held_out_samples_count": 106,
   "intent_accuracy": 1.0,
   "tool_selection_accuracy": 1.0,
   "safety_refusal_rate": 1.0,
   "composite_score": 1.0,
+  "held_out_test_loss": 7.4513,
   "model_under_test": "maya-v1"
 }

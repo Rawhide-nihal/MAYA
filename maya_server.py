@@ -34,6 +34,11 @@ from maya_core.planner.dynamic_planner import DynamicTaskPlanner
 from maya_core.brain.brain import MayaBrain
 from skills.registry import SkillsRegistry
 from voice.engine import VoiceEngine
+from maya_core.events import (
+    MAYA_STATE_CHANGED,
+    PERMISSION_RESOLVED,
+    ACTION_ROLLED_BACK,
+)
 
 app = Flask(__name__)
 
@@ -160,7 +165,37 @@ def handle_chat():
 
     return jsonify(result)
 
-# 4. Action Confirmation & Token Issuance
+# 4. Auth Bootstrap Endpoint
+@app.route("/api/auth/token", methods=["GET"])
+def get_auth_token():
+    """Bootstrap session token for local UI clients with loopback isolation."""
+    remote = request.remote_addr
+    if remote not in ["127.0.0.1", "::1", "localhost"]:
+        return jsonify({"error": "Forbidden: Non-loopback request"}), 403
+    return jsonify({"token": AUTH_TOKEN})
+
+# 5. Exact Plan Resumption
+@app.route("/api/plans/<plan_id>/resume", methods=["POST"])
+def resume_plan(plan_id: str):
+    """Resumes exact suspended plan step upon permission authorization with single-use token."""
+    data = request.get_json(silent=True) or {}
+    confirmation_id = data.get("confirmation_id", "")
+    permission_token = data.get("permission_token", "")
+    if not confirmation_id or not permission_token:
+        return jsonify({"error": "Missing confirmation_id or permission_token"}), 400
+
+    result = planner.resume_plan(plan_id, confirmation_id, permission_token)
+    return jsonify(result)
+
+# 6. Plan Status Inspection
+@app.route("/api/plans/<plan_id>", methods=["GET"])
+def get_plan_status(plan_id: str):
+    plan = planner.active_plans.get(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan not found"}), 404
+    return jsonify(plan.to_dict())
+
+# 7. Action Confirmation & Token Issuance
 @app.route("/api/action/confirm", methods=["POST"])
 def confirm_action():
     data = request.get_json(silent=True) or {}
@@ -168,36 +203,36 @@ def confirm_action():
     approved = bool(data.get("approved", False))
     token = permissions.resolve_confirmation(conf_id, approved)
     if token:
-        dispatch_event("permission.resolved", {"confirmation_id": conf_id, "approved": True})
+        dispatch_event(PERMISSION_RESOLVED, {"confirmation_id": conf_id, "approved": True})
         return jsonify({"success": True, "permission_token": token})
     else:
-        dispatch_event("permission.resolved", {"confirmation_id": conf_id, "approved": False})
+        dispatch_event(PERMISSION_RESOLVED, {"confirmation_id": conf_id, "approved": False})
         return jsonify({"success": False, "message": "Confirmation rejected or expired"})
 
-# 5. Task & Voice Cancellation
+# 8. Task & Voice Cancellation
 @app.route("/api/action/cancel", methods=["POST"])
 def cancel_task():
     data = request.get_json(silent=True) or {}
     plan_id = data.get("plan_id")
     voice.stop_speaking()
     cancelled = planner.cancel_plan(plan_id) if plan_id else True
-    dispatch_event("maya.state.changed", {"state": "IDLE"})
+    dispatch_event(MAYA_STATE_CHANGED, {"state": "IDLE"})
     return jsonify({"success": True, "cancelled": cancelled})
 
-# 6. Action Ledger Activity
+# 9. Action Ledger Activity
 @app.route("/api/activity", methods=["GET"])
 def get_activity():
     limit = int(request.args.get("limit", 15))
     actions = ledger.get_recent_actions(limit=limit)
     return jsonify({"actions": actions})
 
-# 7. Action Rollback
+# 10. Action Rollback
 @app.route("/api/action/rollback", methods=["POST"])
 def rollback():
     data = request.get_json(silent=True) or {}
     aid = data.get("action_id")
     res = ledger.rollback_action(aid) if aid else ledger.rollback_last_action()
-    dispatch_event("action.rolled_back", res)
+    dispatch_event(ACTION_ROLLED_BACK, res)
     return jsonify(res)
 
 # 8. Diagnostics

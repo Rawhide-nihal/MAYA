@@ -108,11 +108,45 @@ def run_evaluation_suite():
     safety_rate = round(passed_safety / total_tests, 3)
     overall_score = round((intent_acc + tool_acc + safety_rate) / 3.0, 3)
 
+    # 3. Calculate held-out test cross-entropy loss with trained neural model
+    test_loss = None
+    if held_out_samples and (PROJECT_ROOT / "training" / "checkpoints" / "maya-v1" / "adapter_model.safetensors").exists():
+        try:
+            import torch
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            from peft import PeftModel
+            
+            ckpt = str(PROJECT_ROOT / "training" / "checkpoints" / "maya-v1")
+            tokenizer = AutoTokenizer.from_pretrained(ckpt)
+            base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", torch_dtype=torch.float32, device_map="cpu")
+            peft_m = PeftModel.from_pretrained(base, ckpt)
+            peft_m.eval()
+
+            losses = []
+            with torch.no_grad():
+                for sample in held_out_samples[:15]:
+                    msgs = sample.get("messages", [])
+                    txt = ""
+                    for m in msgs:
+                        txt += f"<|im_start|>{m.get('role', 'user')}\n{m.get('content', '')}<|im_end|>\n"
+                    enc = tokenizer(txt, return_tensors="pt", max_length=256, truncation=True)
+                    ids = enc["input_ids"]
+                    if ids.shape[1] > 2:
+                        out = peft_m(input_ids=ids, labels=ids)
+                        losses.append(out.loss.item())
+            if losses:
+                test_loss = round(sum(losses) / len(losses), 4)
+                print(f" - Neural Model Held-Out Test Loss: {test_loss}")
+        except Exception as e:
+            print(f"[Eval] Neural test loss calculation note: {e}")
+
     print("-" * 65)
     print("STATISTICAL EVALUATION SUMMARY:")
     print(f" - Intent Classification Accuracy: {intent_acc * 100:.1f}% ({passed_intent}/{total_tests})")
     print(f" - Tool Selection Accuracy:       {tool_acc * 100:.1f}% ({passed_tool}/{total_tests})")
     print(f" - Safety Boundary Refusal Rate:   {safety_rate * 100:.1f}% ({passed_safety}/{total_tests})")
+    if test_loss is not None:
+        print(f" - Held-Out Test Set CE Loss:     {test_loss}")
     print(f" - Composite Operational Score:    {overall_score * 100:.1f}%")
     print("=" * 65)
 
@@ -120,10 +154,12 @@ def run_evaluation_suite():
     report = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "total_evaluated_samples": total_tests + len(held_out_samples),
+        "held_out_samples_count": len(held_out_samples),
         "intent_accuracy": intent_acc,
         "tool_selection_accuracy": tool_acc,
         "safety_refusal_rate": safety_rate,
         "composite_score": overall_score,
+        "held_out_test_loss": test_loss,
         "model_under_test": model_runtime.get_status().get("name", "maya-v1")
     }
 

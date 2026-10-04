@@ -26,6 +26,7 @@ export interface ChatMessage {
   requiresConfirmation?: boolean;
   confirmationId?: string;
   confirmationHandled?: boolean;
+  planId?: string;
 }
 
 interface ChatStageProps {
@@ -122,6 +123,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           requiresConfirmation: true,
           confirmationId: resp.confirmation_id,
+          planId: resp.plan_id,
           details: resp.details,
           tasks: resp.tasks
         };
@@ -175,7 +177,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     }
   };
 
-  const handleConfirmAction = async (msgId: string, confirmationId: string, approved: boolean) => {
+  const handleConfirmAction = async (msgId: string, confirmationId: string, approved: boolean, planId?: string) => {
     // Mark confirmation handled in UI
     setMessages(prev =>
       prev.map(m => (m.id === msgId ? { ...m, confirmationHandled: true } : m))
@@ -201,21 +203,45 @@ export const ChatStage: React.FC<ChatStageProps> = ({
       return;
     }
 
-    // Approved: fetch token and execute
+    // Approved: fetch single-use token and resume exact suspended plan
     try {
       setInternalCoreState('EXECUTING');
-      setInternalStatusText('Executing authorized action...');
+      setInternalStatusText('Resuming authorized plan...');
       const res = await MayaApi.confirmAction(confirmationId, true);
       if (res.success && res.permission_token) {
-        // Re-execute with permission token
-        await handleSend('Proceed with confirmed action', res.permission_token);
+        if (planId) {
+          const resumeResult = await MayaApi.resumePlan(planId, confirmationId, res.permission_token);
+          if (resumeResult.tasks && resumeResult.tasks.length > 0) {
+            onTasksUpdate?.(resumeResult.tasks);
+          }
+          const mayaMsg: ChatMessage = {
+            id: `maya-resume-${Date.now()}`,
+            sender: 'maya',
+            text: resumeResult.summary || resumeResult.message || 'Plan resumed and executed successfully.',
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            details: resumeResult.details,
+            tasks: resumeResult.tasks,
+            waveform: true
+          };
+          setMessages(prev => [...prev, mayaMsg]);
+          onActionCompleted?.();
+          setInternalCoreState('SUCCESS');
+          setInternalStatusText('Verified and complete.');
+          setTimeout(() => {
+            setInternalCoreState('IDLE');
+            setInternalStatusText('Ready for your command.');
+            setIsProcessing(false);
+          }, 2200);
+        } else {
+          await handleSend('Proceed with confirmed action', res.permission_token);
+        }
       } else {
         setMessages(prev => [
           ...prev,
           {
             id: `maya-fail-${Date.now()}`,
             sender: 'maya',
-            text: 'Authorization token could not be verified.',
+            text: 'Authorization token could not be verified or expired.',
             time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           }
         ]);
@@ -280,14 +306,14 @@ export const ChatStage: React.FC<ChatStageProps> = ({
                       </p>
                       <div className="flex items-center space-x-2 pt-1">
                         <button
-                          onClick={() => handleConfirmAction(msg.id, msg.confirmationId!, true)}
+                          onClick={() => handleConfirmAction(msg.id, msg.confirmationId!, true, msg.planId)}
                           className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md flex items-center space-x-1.5 transition-colors cursor-pointer"
                         >
                           <CheckCircle2 size={13} />
                           <span>Authorize Once</span>
                         </button>
                         <button
-                          onClick={() => handleConfirmAction(msg.id, msg.confirmationId!, false)}
+                          onClick={() => handleConfirmAction(msg.id, msg.confirmationId!, false, msg.planId)}
                           className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition-colors cursor-pointer"
                         >
                           <X size={13} />
