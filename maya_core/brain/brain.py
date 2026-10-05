@@ -5,7 +5,7 @@ Coordinates: Context -> Memory -> Neural Model -> Structured Decision ->
              Verification -> Neural Result Synthesis.
 Deterministic Intent Classifier is maintained strictly as an emergency safety fallback.
 """
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Generator
 import time
 import json
 
@@ -38,6 +38,133 @@ class MayaBrain:
         self.tool_registry = default_tool_registry
         # Deterministic classifier reserved as emergency safety fallback
         self.fallback_classifier = DeterministicIntentClassifier()
+
+    def is_fast_conversation(self, user_text: str) -> bool:
+        """Return True only for ordinary conversation that does not map to a PC/tool action."""
+        cleaned_query = (user_text or "").strip()
+        if not cleaned_query:
+            return False
+        intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
+        return (
+            not intent_info.get("tool")
+            and intent_info.get("intent", "CHAT") in ["QUESTION", "SUGGESTION", "CHAT"]
+        )
+
+    def stream_conversation(self, user_text: str) -> Generator[Dict[str, Any], None, None]:
+        """Stream ordinary conversation while keeping structured internal output hidden."""
+        cleaned_query = (user_text or "").strip()
+        if not cleaned_query:
+            yield {"type": "error", "error": "Empty query"}
+            return
+        if not self.is_fast_conversation(cleaned_query):
+            yield {"type": "error", "error": "Request is not eligible for conversational streaming"}
+            return
+
+        self.memory.add_message("user", cleaned_query)
+        self.planner.emit("maya.state.changed", {"state": "THINKING"})
+        ctx = self.context_builder.build_chat_context(cleaned_query)
+
+        started_at = time.perf_counter()
+        first_token_at: Optional[float] = None
+        raw_output = ""
+        pending = ""
+        output_mode: Optional[str] = None
+        streamed_any = False
+
+        try:
+            for chunk in self.runtime.stream_generate(
+                cleaned_query,
+                system_prompt=ctx["prompt"],
+                max_new_tokens=96,
+                temperature=0.6,
+                top_p=0.9,
+            ):
+                if not chunk:
+                    continue
+                raw_output += chunk
+
+                if output_mode is None:
+                    pending += chunk
+                    probe = pending.lstrip()
+                    if probe.startswith("{"):
+                        output_mode = "buffer"
+                        continue
+                    if probe.startswith("`") and len(probe) < 3:
+                        continue
+                    if probe.startswith("```"):
+                        output_mode = "buffer"
+                        continue
+                    output_mode = "stream"
+                    if pending:
+                        if first_token_at is None:
+                            first_token_at = time.perf_counter()
+                        streamed_any = True
+                        yield {"type": "token", "delta": pending}
+                        pending = ""
+                    continue
+
+                if output_mode == "stream":
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    streamed_any = True
+                    yield {"type": "token", "delta": chunk}
+
+            reply = self._extract_conversation_text(raw_output)
+            if output_mode == "buffer" or not streamed_any:
+                if reply:
+                    if first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    yield {"type": "token", "delta": reply}
+
+            self.memory.add_message("maya", reply)
+            finished_at = time.perf_counter()
+            first_token_ms = (
+                round((first_token_at - started_at) * 1000, 1)
+                if first_token_at is not None
+                else None
+            )
+            total_ms = round((finished_at - started_at) * 1000, 1)
+            print(
+                f"[MayaBrain] Streamed chat: first_token={first_token_ms}ms "
+                f"total={total_ms}ms chars={len(reply)}"
+            )
+            yield {
+                "type": "done",
+                "result": {
+                    "intent": "CHAT",
+                    "reply": reply,
+                    "executed_tool": None,
+                    "tasks": [],
+                    "fallback_used": False,
+                    "fast_path": True,
+                    "timing": {"first_token_ms": first_token_ms, "total_ms": total_ms},
+                    "timestamp": time.time(),
+                },
+            }
+        except Exception as e:
+            print(f"[MayaBrain] Streaming chat generation error: {e}")
+            reply = (
+                self._extract_conversation_text(raw_output)
+                if raw_output.strip()
+                else "I hit a local model error while answering that."
+            )
+            if not streamed_any and reply:
+                yield {"type": "token", "delta": reply}
+            self.memory.add_message("maya", reply)
+            yield {
+                "type": "done",
+                "result": {
+                    "intent": "CHAT",
+                    "reply": reply,
+                    "executed_tool": None,
+                    "tasks": [],
+                    "fallback_used": False,
+                    "fast_path": True,
+                    "timestamp": time.time(),
+                },
+            }
+        finally:
+            self.planner.emit("maya.state.changed", {"state": "IDLE"})
 
     def process_request(self, user_text: str, permission_token: Optional[str] = None) -> Dict[str, Any]:
         """
