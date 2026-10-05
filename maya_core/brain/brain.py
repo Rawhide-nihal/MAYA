@@ -295,23 +295,29 @@ class MayaBrain:
                 ])
             ]
 
+            ocr = capture.get("ocr") or {}
+            ocr_text = str(ocr.get("text") or "").strip()
             factual_payload = {
                 "window_title": window,
                 "window_title_errors": errors[:5],
                 "accessibility_available": bool(ui_context.get("success")),
                 "controls": visible_controls,
                 "error_related_controls": error_controls[:20],
+                "ocr_available": bool(ocr.get("success")),
+                "ocr_text": ocr_text[:12000],
+                "ocr_lines": (ocr.get("lines") or [])[:120],
             }
 
-            if ui_context.get("success") and visible_controls:
+            if (ui_context.get("success") and visible_controls) or ocr_text:
                 policy = self.personality.policy(cleaned, {"visible_errors": errors})
                 analysis_prompt = (
                     "The user asked: " + cleaned + "\n"
-                    "You are given ONLY real Windows accessibility/UI Automation data from the foreground app. "
-                    "Use only controls actually present below. Do not invent page text, buttons, errors, or click targets. "
-                    "If asked where to click, name the exact visible control and, when available, its bounds. "
-                    "If asked to read/summarize, summarize the exposed accessible text. "
-                    "If the accessibility data is insufficient, say so clearly.\n"
+                    "You are given ONLY grounded Windows accessibility/UI Automation data and Windows OCR text from the foreground app. "
+                    "Use only controls/text actually present below. Do not invent page text, buttons, errors, or click targets. "
+                    "If asked where to click, prefer an exact accessible control and its bounds; if only OCR is available, "
+                    "you may reference OCR word bounds but must say it came from OCR. "
+                    "If asked to read/summarize, summarize only the exposed accessible/OCR text. "
+                    "If the grounded data is insufficient, say so clearly.\n"
                     "UI DATA:\n" + json.dumps(factual_payload, default=str)[:16000]
                 )
                 try:
@@ -334,6 +340,9 @@ class MayaBrain:
                     if error_controls:
                         names = ", ".join(str(c.get("name")) for c in error_controls[:5] if c.get("name"))
                         reply = f"I'm looking at {window}, Boss. The accessibility tree exposes error-related UI: {names}."
+                    elif ocr_text:
+                        preview = " ".join(ocr_text.split())[:500]
+                        reply = f"I'm looking at {window}, Boss. Windows OCR reads: {preview}"
                     else:
                         reply = (
                             f"I'm looking at {window}, Boss. I can read {len(visible_controls)} accessible UI controls, "
@@ -345,8 +354,8 @@ class MayaBrain:
                     reply = f"I'm looking at {window}, Boss. I detected: {error_text}"
                 else:
                     reply = (
-                        f"I'm looking at {window}, Boss. The screenshot is captured, but this surface is not exposing "
-                        "usable accessibility text/controls, so I won't guess what the pixels say."
+                        f"I'm looking at {window}, Boss. The screenshot is captured, but neither UI Automation nor "
+                        "Windows OCR exposed enough readable data, so I won't guess what the pixels say."
                     )
 
             details = {
