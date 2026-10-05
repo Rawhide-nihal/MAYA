@@ -12,7 +12,7 @@ import wave
 import tempfile
 import threading
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any
 
 import numpy as np
 try:
