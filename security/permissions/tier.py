@@ -87,6 +87,7 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "rollback_last_action": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "create_directory": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "run_safe_command": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "prepare_communication": PermissionLevel.LEVEL_2_SAFE_ACTION,
 
     # Modification (Level 3)
     "write_file": PermissionLevel.LEVEL_3_MODIFICATION,
@@ -99,6 +100,7 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "close_application": PermissionLevel.LEVEL_3_MODIFICATION,
     "clean_temp_files": PermissionLevel.LEVEL_3_MODIFICATION,
     "execute_terminal_command": PermissionLevel.LEVEL_3_MODIFICATION,
+    "send_communication": PermissionLevel.LEVEL_3_MODIFICATION,
 
     # Critical (Level 4)
     "delete_file": PermissionLevel.LEVEL_4_CRITICAL,
