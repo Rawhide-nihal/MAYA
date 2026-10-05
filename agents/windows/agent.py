@@ -4,6 +4,7 @@ Autonomous interaction with Windows applications, windows, processes, and genuin
 Uses deterministic priority: native APIs -> CLI/PowerShell -> UI Automation.
 """
 import os
+import json
 import sys
 import subprocess
 import shutil
@@ -32,6 +33,126 @@ except ImportError:
 class WindowsAgent:
     def __init__(self):
         pass
+
+    def _chrome_user_data_dir(self) -> str:
+        return os.path.join(
+            os.environ.get("LOCALAPPDATA", ""),
+            "Google",
+            "Chrome",
+            "User Data"
+        )
+
+    def _load_chrome_profile_state(self) -> Dict[str, Any]:
+        """Read Chrome's local profile metadata without exposing it outside the PC."""
+        local_state_path = os.path.join(self._chrome_user_data_dir(), "Local State")
+        if not os.path.exists(local_state_path):
+            return {}
+        try:
+            with open(local_state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def resolve_chrome_profile(self, profile_hint: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Resolve a Chrome profile directory from a human hint such as:
+        'main', 'primary', a Chrome profile name, directory name, or account email.
+
+        Nothing is hardcoded to a specific user's email. Resolution happens
+        locally from Chrome's own Local State metadata.
+        """
+        state = self._load_chrome_profile_state()
+        profile_state = state.get("profile", {}) if isinstance(state, dict) else {}
+        info_cache = profile_state.get("info_cache", {}) if isinstance(profile_state, dict) else {}
+        if not isinstance(info_cache, dict):
+            info_cache = {}
+
+        raw_hint = (profile_hint or "").strip()
+        hint = raw_hint.lower()
+        main_aliases = {
+            "", "main", "main account", "main profile",
+            "primary", "primary account", "primary profile",
+            "default account", "my account", "my main account"
+        }
+
+        # Allow a private local override without committing account data to Git.
+        local_override = os.environ.get("MAYA_CHROME_MAIN_PROFILE", "").strip()
+        if hint in main_aliases and local_override:
+            raw_hint = local_override
+            hint = local_override.lower()
+
+        # Explicit profile/account hints: match directory, profile label, or signed-in user name.
+        if hint and hint not in main_aliases:
+            for directory, meta in info_cache.items():
+                meta = meta if isinstance(meta, dict) else {}
+                candidates = [
+                    directory,
+                    str(meta.get("name", "")),
+                    str(meta.get("shortcut_name", "")),
+                    str(meta.get("user_name", "")),
+                    str(meta.get("gaia_name", "")),
+                ]
+                if any(hint == value.strip().lower() for value in candidates if value):
+                    return {
+                        "success": True,
+                        "profile_directory": directory,
+                        "profile_name": meta.get("name") or directory,
+                        "resolution": "explicit_hint",
+                    }
+
+        # 'Main' means Chrome's locally preferred/most-recent primary profile.
+        if hint in main_aliases:
+            last_used = profile_state.get("last_used")
+            if last_used in info_cache:
+                meta = info_cache.get(last_used, {})
+                return {
+                    "success": True,
+                    "profile_directory": last_used,
+                    "profile_name": meta.get("name") or last_used,
+                    "resolution": "chrome_last_used",
+                }
+
+            last_active = profile_state.get("last_active_profiles")
+            if isinstance(last_active, list):
+                for directory in last_active:
+                    if directory in info_cache:
+                        meta = info_cache.get(directory, {})
+                        return {
+                            "success": True,
+                            "profile_directory": directory,
+                            "profile_name": meta.get("name") or directory,
+                            "resolution": "chrome_last_active",
+                        }
+
+            if "Default" in info_cache or os.path.isdir(os.path.join(self._chrome_user_data_dir(), "Default")):
+                meta = info_cache.get("Default", {})
+                return {
+                    "success": True,
+                    "profile_directory": "Default",
+                    "profile_name": meta.get("name") or "Default",
+                    "resolution": "chrome_default",
+                }
+
+            if info_cache:
+                def _activity(item):
+                    meta = item[1] if isinstance(item[1], dict) else {}
+                    try:
+                        return float(meta.get("active_time", 0) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                directory, meta = max(info_cache.items(), key=_activity)
+                return {
+                    "success": True,
+                    "profile_directory": directory,
+                    "profile_name": meta.get("name") or directory,
+                    "resolution": "most_recent_profile",
+                }
+
+        return {
+            "success": False,
+            "error": f"Could not resolve Chrome profile hint '{raw_hint or 'main'}'."
+        }
 
     def find_application_path(self, app_name: str) -> Optional[str]:
         app_lower = app_name.lower().strip()
@@ -98,7 +219,13 @@ class WindowsAgent:
         general = shutil.which(app_name) or shutil.which(f"{app_name}.exe")
         return general
 
-    def launch_application(self, app_name: str, arguments: Optional[List[str]] = None, cwd: Optional[str] = None) -> Dict[str, Any]:
+    def launch_application(
+        self,
+        app_name: str,
+        arguments: Optional[List[str]] = None,
+        cwd: Optional[str] = None,
+        profile: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Launches an application and strictly verifies the process actually starts.
         Never reports success if the process or window does not launch.
@@ -128,6 +255,32 @@ class WindowsAgent:
                 }
 
         cmd = [app_path]
+        resolved_profile = None
+
+        if "chrome" in app_name.lower():
+            inferred_profile = profile
+            lowered_app = app_name.lower()
+            if not inferred_profile and any(
+                phrase in lowered_app
+                for phrase in ["main account", "main profile", "primary account", "primary profile"]
+            ):
+                inferred_profile = "main"
+
+            if inferred_profile:
+                profile_result = self.resolve_chrome_profile(inferred_profile)
+                if not profile_result.get("success"):
+                    return {
+                        "success": False,
+                        "application": "Google Chrome",
+                        "verified": False,
+                        "error": profile_result.get("error", "Chrome profile could not be resolved."),
+                    }
+                resolved_profile = profile_result
+                cmd.extend([
+                    f"--profile-directory={profile_result['profile_directory']}",
+                    "--new-window",
+                ])
+
         if arguments:
             cmd.extend(arguments)
 
@@ -157,7 +310,7 @@ class WindowsAgent:
                     "error": f"Application binary executed but process did not remain active."
                 }
 
-            return {
+            result = {
                 "success": True,
                 "application": app_name,
                 "executable": app_path,
@@ -165,6 +318,15 @@ class WindowsAgent:
                 "verified": True,
                 "message": f"Successfully launched and verified {app_name}."
             }
+            if resolved_profile:
+                result["profile_directory"] = resolved_profile.get("profile_directory")
+                result["profile_name"] = resolved_profile.get("profile_name")
+                result["profile_resolution"] = resolved_profile.get("resolution")
+                result["message"] = (
+                    f"Successfully launched Google Chrome with profile "
+                    f"'{resolved_profile.get('profile_name')}'."
+                )
+            return result
         except Exception as e:
             return {
                 "success": False,
