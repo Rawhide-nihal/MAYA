@@ -55,11 +55,11 @@ class WindowsAgent:
 
     def resolve_chrome_profile(self, profile_hint: Optional[str] = None) -> Dict[str, Any]:
         """
-        Resolve a Chrome profile directory from a human hint such as:
-        'main', 'primary', a Chrome profile name, directory name, or account email.
+        Resolve the exact Chrome profile MAYA should use.
 
-        Nothing is hardcoded to a specific user's email. Resolution happens
-        locally from Chrome's own Local State metadata.
+        For user aliases such as main/default/primary, an explicitly configured
+        local profile is authoritative. MAYA does not silently replace it with
+        Chrome's last-used profile.
         """
         state = self._load_chrome_profile_state()
         profile_state = state.get("profile", {}) if isinstance(state, dict) else {}
@@ -69,34 +69,88 @@ class WindowsAgent:
 
         raw_hint = (profile_hint or "").strip()
         hint = raw_hint.lower()
+
         main_aliases = {
             "", "main", "main account", "main profile",
             "primary", "primary account", "primary profile",
-            "default account", "my account", "my main account"
+            "default", "default account", "default profile",
+            "my account", "my main account", "my default",
+            "my default account", "my default profile"
         }
 
-        # Allow a private local override without committing account data to Git.
-        # MAYA settings live under %LOCALAPPDATA%/Maya/settings.json, not in the repo.
-        configured_override = ""
+        configured_profile = ""
+        configured_account = ""
         try:
             from maya_core.config import settings
-            configured_override = str(
-                settings.get("chrome_main_account", "")
-                or settings.get("chrome_main_profile", "")
-                or ""
-            ).strip()
+            configured_profile = str(settings.get("chrome_main_profile", "") or "").strip()
+            configured_account = str(settings.get("chrome_main_account", "") or "").strip()
         except Exception:
-            configured_override = ""
+            pass
 
-        local_override = (
-            configured_override
-            or os.environ.get("MAYA_CHROME_MAIN_PROFILE", "").strip()
-        )
-        if hint in main_aliases and local_override:
-            raw_hint = local_override
-            hint = local_override.lower()
+        env_override = os.environ.get("MAYA_CHROME_MAIN_PROFILE", "").strip()
 
-        # Explicit profile/account hints: match directory, profile label, or signed-in user name.
+        # Any user-facing "main/default/primary" alias means the explicitly
+        # selected local MAYA Chrome profile first.
+        if hint in main_aliases:
+            preferred = configured_profile or env_override
+            if preferred:
+                preferred_lower = preferred.lower()
+                for directory, meta in info_cache.items():
+                    meta = meta if isinstance(meta, dict) else {}
+                    if preferred_lower in {
+                        directory.lower(),
+                        str(meta.get("name", "")).strip().lower(),
+                        str(meta.get("shortcut_name", "")).strip().lower(),
+                    }:
+                        return {
+                            "success": True,
+                            "profile_directory": directory,
+                            "profile_name": meta.get("name") or directory,
+                            "resolution": "configured_main_profile",
+                        }
+
+                # A configured directory can still be valid before Local State
+                # refreshes its info_cache entry.
+                candidate_dir = os.path.join(self._chrome_user_data_dir(), preferred)
+                if os.path.isdir(candidate_dir):
+                    return {
+                        "success": True,
+                        "profile_directory": preferred,
+                        "profile_name": preferred,
+                        "resolution": "configured_main_profile_directory",
+                    }
+
+            if configured_account:
+                account_lower = configured_account.lower()
+                for directory, meta in info_cache.items():
+                    meta = meta if isinstance(meta, dict) else {}
+                    candidates = {
+                        str(meta.get("user_name", "")).strip().lower(),
+                        str(meta.get("gaia_name", "")).strip().lower(),
+                    }
+                    if account_lower in candidates:
+                        return {
+                            "success": True,
+                            "profile_directory": directory,
+                            "profile_name": meta.get("name") or directory,
+                            "resolution": "configured_main_account",
+                        }
+
+            # If the user explicitly said "default" and no MAYA preference has
+            # been selected, use Chrome's real Default directory before guessing
+            # from recency.
+            if hint in {"default", "default profile", "default account", "my default", "my default profile", "my default account"}:
+                default_path = os.path.join(self._chrome_user_data_dir(), "Default")
+                if "Default" in info_cache or os.path.isdir(default_path):
+                    meta = info_cache.get("Default", {})
+                    return {
+                        "success": True,
+                        "profile_directory": "Default",
+                        "profile_name": meta.get("name") or "Default",
+                        "resolution": "chrome_default_directory",
+                    }
+
+        # Explicit directory/profile/account/email hint.
         if hint and hint not in main_aliases:
             for directory, meta in info_cache.items():
                 meta = meta if isinstance(meta, dict) else {}
@@ -115,7 +169,7 @@ class WindowsAgent:
                         "resolution": "explicit_hint",
                     }
 
-        # 'Main' means Chrome's locally preferred/most-recent primary profile.
+        # Only when MAYA has no explicit preference: fall back to Chrome state.
         if hint in main_aliases:
             last_used = profile_state.get("last_used")
             if last_used in info_cache:
@@ -124,20 +178,8 @@ class WindowsAgent:
                     "success": True,
                     "profile_directory": last_used,
                     "profile_name": meta.get("name") or last_used,
-                    "resolution": "chrome_last_used",
+                    "resolution": "chrome_last_used_fallback",
                 }
-
-            last_active = profile_state.get("last_active_profiles")
-            if isinstance(last_active, list):
-                for directory in last_active:
-                    if directory in info_cache:
-                        meta = info_cache.get(directory, {})
-                        return {
-                            "success": True,
-                            "profile_directory": directory,
-                            "profile_name": meta.get("name") or directory,
-                            "resolution": "chrome_last_active",
-                        }
 
             if "Default" in info_cache or os.path.isdir(os.path.join(self._chrome_user_data_dir(), "Default")):
                 meta = info_cache.get("Default", {})
@@ -145,28 +187,15 @@ class WindowsAgent:
                     "success": True,
                     "profile_directory": "Default",
                     "profile_name": meta.get("name") or "Default",
-                    "resolution": "chrome_default",
-                }
-
-            if info_cache:
-                def _activity(item):
-                    meta = item[1] if isinstance(item[1], dict) else {}
-                    try:
-                        return float(meta.get("active_time", 0) or 0)
-                    except (TypeError, ValueError):
-                        return 0.0
-
-                directory, meta = max(info_cache.items(), key=_activity)
-                return {
-                    "success": True,
-                    "profile_directory": directory,
-                    "profile_name": meta.get("name") or directory,
-                    "resolution": "most_recent_profile",
+                    "resolution": "chrome_default_fallback",
                 }
 
         return {
             "success": False,
-            "error": f"Could not resolve Chrome profile hint '{raw_hint or 'main'}'."
+            "error": (
+                f"Could not resolve Chrome profile hint '{raw_hint or 'main'}'. "
+                "Run scripts\\configure_chrome_main_profile.py to select it explicitly."
+            )
         }
 
     def find_application_path(self, app_name: str) -> Optional[str]:
