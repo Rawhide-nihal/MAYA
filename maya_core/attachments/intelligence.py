@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PIL import Image
+from agents.vision.ocr import windows_ocr
 
 
 TEXT_EXTENSIONS = {
@@ -256,19 +257,36 @@ class AttachmentIntelligence:
             width, height = image.size
             mode = image.mode
             fmt = image.format
+
+        ocr = windows_ocr.recognize_file(str(path))
+        extracted = str(ocr.get("text") or "").strip() if ocr.get("success") else ""
+        capabilities = ["image_metadata", "visual_context_reference"]
+        warnings = []
+        confidence = "medium"
+
+        if extracted:
+            capabilities.extend(["windows_ocr", "text_bounding_boxes"])
+            confidence = "high"
+        else:
+            warnings.append(
+                "No readable OCR text was extracted. MAYA will retain/reference the image but will not invent visual details "
+                "that are not available through OCR or another grounded vision source."
+            )
+
         return {
-            "capabilities": ["image_metadata", "visual_context_reference"],
+            "capabilities": capabilities,
             "width": width,
             "height": height,
             "image_mode": mode,
             "image_format": fmt,
-            "extracted_text": "",
-            "confidence": "medium",
-            "warnings": [
-                "Image loaded successfully, but the current local MAYA text model has no general visual-language/OCR model. "
-                "MAYA can retain/reference this image but will not invent visual details."
-            ],
-            "summary": f"Image {width}x{height} ({fmt or path.suffix}).",
+            "ocr": ocr,
+            "extracted_text": self._bounded(extracted),
+            "confidence": confidence,
+            "warnings": warnings,
+            "summary": (
+                f"Image {width}x{height} ({fmt or path.suffix}); "
+                f"OCR extracted {len(extracted)} character(s)."
+            ),
         }
 
     def _zip(self, path: Path) -> Dict[str, Any]:
