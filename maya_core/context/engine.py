@@ -417,7 +417,7 @@ class UnifiedContextEngine:
         if raw in self.named_refs:
             return self.named_refs[raw]
 
-        if "screenshot" in raw or raw in {"this", "that", "before", "previous", "latest"}:
+        if "screenshot" in raw:
             record = self._find_screenshot(raw)
             if record:
                 return {"kind": "screenshot", "value": record, "label": raw}
@@ -425,7 +425,9 @@ class UnifiedContextEngine:
         if any(word in raw for word in ["attachment", "file", "document"]) and self.attachments:
             return {"kind": "attachment", "value": self.attachments[-1], "label": raw}
 
-        if raw in {"it", "that", "this"} and self.entities:
+        # Generic pronouns refer to the most recently registered session entity,
+        # regardless of whether it was a screenshot, attachment, file, or tool result.
+        if raw in {"it", "that", "this", "latest"} and self.entities:
             return self.entities[-1]
 
         if raw in {"before", "previous"} and len(self.entities) > 1:
