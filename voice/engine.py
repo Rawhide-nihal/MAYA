@@ -12,10 +12,9 @@ import wave
 import tempfile
 import threading
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any
 
 import numpy as np
-import pyttsx3
 try:
     import winsound
 except ImportError:
@@ -37,6 +36,7 @@ from maya_core.events import (
 )
 
 from voice.stt.provider import SpeechRecognitionProvider
+from voice.tts.provider import KokoroTTSProvider, FemalePyttsx3Provider
 from voice.wakeword.detector import WakeWordDetector
 
 def calculate_pcm_rms(pcm_bytes: bytes) -> float:
@@ -54,8 +54,8 @@ def calculate_pcm_rms(pcm_bytes: bytes) -> float:
 class VoiceEngine:
     def __init__(self, event_emitter: Optional[Callable[[str, dict], None]] = None):
         self.event_emitter = event_emitter
-        self.tts_engine = None
-        self._init_tts()
+        self.tts_provider = KokoroTTSProvider(voice="af_heart", speed=1.0)
+        self.tts_fallback = FemalePyttsx3Provider()
         self.stt_provider = SpeechRecognitionProvider()
         self.wakeword_detector = WakeWordDetector()
         self.is_speaking = False
@@ -64,19 +64,6 @@ class VoiceEngine:
         self.current_thread: Optional[threading.Thread] = None
         self.listener_thread: Optional[threading.Thread] = None
         self._listener_active = False
-
-    def _init_tts(self):
-        try:
-            self.tts_engine = pyttsx3.init()
-            self.tts_engine.setProperty('rate', 175)
-            self.tts_engine.setProperty('volume', 0.95)
-            voices = self.tts_engine.getProperty('voices')
-            for v in voices:
-                if any(name in v.name.lower() for name in ["zira", "female", "hazel", "eva"]):
-                    self.tts_engine.setProperty('voice', v.id)
-                    break
-        except Exception:
-            self.tts_engine = None
 
     def emit(self, event_name: str, payload: dict):
         if self.event_emitter:
@@ -94,75 +81,78 @@ class VoiceEngine:
                 winsound.PlaySound(None, winsound.SND_PURGE)
             except Exception:
                 pass
-        if self.tts_engine:
+        # Kokoro renders complete WAV files; winsound purge interrupts playback.
+        # The fallback pyttsx3 engine is stopped only when it exists.
+        fallback_engine = getattr(self.tts_fallback, "engine", None)
+        if fallback_engine:
             try:
-                self.tts_engine.stop()
+                fallback_engine.stop()
             except Exception:
                 pass
         self.emit(VOICE_SPEAKING_COMPLETED, {"interrupted": True})
         self.emit(MAYA_STATE_CHANGED, {"state": "IDLE"})
 
     def speak(self, text: str, on_complete: Optional[Callable[[], None]] = None):
-        """
-        Synthesizes speech to PCM audio, streams true RMS amplitude per audio buffer frame,
-        and plays audio with immediate barge-in interruption support.
-        """
+        """Speak with Kokoro female voice; never silently fall back to a male voice."""
         self.stop_speaking()
         self._stop_requested = False
 
         def _run():
             self.is_speaking = True
-            self.emit(VOICE_SPEAKING_STARTED, {"text": text[:60]})
+            self.emit(VOICE_SPEAKING_STARTED, {"text": text[:60], "provider": "kokoro", "voice": "af_heart"})
             self.emit(MAYA_STATE_CHANGED, {"state": "SPEAKING"})
 
-            # Generate temporary WAV file from pyttsx3
             tmp_wav = None
             try:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    tmp_wav = f.name
+                tmp_wav = self.tts_provider.synthesize_to_wav(text)
+                provider_name = "kokoro"
+                if not tmp_wav:
+                    tmp_wav = self.tts_fallback.synthesize_to_wav(text)
+                    provider_name = "pyttsx3_female"
 
-                if self.tts_engine:
-                    self.tts_engine.save_to_file(text, tmp_wav)
-                    self.tts_engine.runAndWait()
+                if not tmp_wav:
+                    self.emit(VOICE_SPEAKING_COMPLETED, {
+                        "interrupted": False,
+                        "success": False,
+                        "error": "No female TTS provider is available.",
+                    })
+                    return
 
-                if tmp_wav and os.path.exists(tmp_wav) and os.path.getsize(tmp_wav) > 100:
-                    with wave.open(tmp_wav, "rb") as wf:
-                        channels = wf.getnchannels()
-                        sampwidth = wf.getsampwidth()
-                        framerate = wf.getframerate()
-                        chunk_frames = int(framerate * 0.05)  # 50ms chunk
-                        chunk_bytes = chunk_frames * channels * sampwidth
+                if winsound:
+                    winsound.PlaySound(tmp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
 
-                        # Play audio asynchronously via winsound
-                        if winsound:
-                            winsound.PlaySound(tmp_wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-
-                        # Emit synchronized real PCM RMS amplitude
-                        while not self._stop_requested:
-                            raw = wf.readframes(chunk_frames)
-                            if not raw:
-                                break
-                            rms_val = calculate_pcm_rms(raw)
-                            self.emit(VOICE_SPEAKING_AMPLITUDE, {"amplitude": rms_val})
-                            time.sleep(0.048)
-                else:
-                    # Fallback timer if TTS engine unavailable
-                    time.sleep(max(1.0, len(text) * 0.04))
-
-            except Exception as e:
-                time.sleep(max(1.0, len(text) * 0.04))
+                with wave.open(tmp_wav, "rb") as wf:
+                    framerate = wf.getframerate()
+                    chunk_frames = max(1, int(framerate * 0.05))
+                    while not self._stop_requested:
+                        raw = wf.readframes(chunk_frames)
+                        if not raw:
+                            break
+                        self.emit(VOICE_SPEAKING_AMPLITUDE, {
+                            "amplitude": calculate_pcm_rms(raw),
+                            "provider": provider_name,
+                        })
+                        time.sleep(0.048)
+            except Exception as exc:
+                self.emit(VOICE_SPEAKING_COMPLETED, {
+                    "interrupted": self._stop_requested,
+                    "success": False,
+                    "error": str(exc),
+                })
             finally:
                 if tmp_wav and os.path.exists(tmp_wav):
                     try:
                         os.unlink(tmp_wav)
                     except Exception:
                         pass
-
-            self.is_speaking = False
-            self.emit(VOICE_SPEAKING_COMPLETED, {"interrupted": self._stop_requested})
-            self.emit(MAYA_STATE_CHANGED, {"state": "IDLE"})
-            if on_complete and not self._stop_requested:
-                on_complete()
+                self.is_speaking = False
+                self.emit(VOICE_SPEAKING_COMPLETED, {
+                    "interrupted": self._stop_requested,
+                    "success": True,
+                })
+                self.emit(MAYA_STATE_CHANGED, {"state": "IDLE"})
+                if on_complete and not self._stop_requested:
+                    on_complete()
 
         self.current_thread = threading.Thread(target=_run, daemon=True)
         self.current_thread.start()
@@ -234,16 +224,24 @@ class VoiceEngine:
             return "interrupted"
         return transcript
 
-    def process_ptt_audio(self, pcm_bytes: bytes, on_text_detected: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
-        """Processes push-to-talk audio recorded from the frontend."""
-        if not sr or not self.stt_provider:
-            return {"success": False, "error": "STT unavailable"}
+    def process_ptt_audio(self, wav_bytes: bytes, on_text_detected: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+        """Process an actual WAV container produced by the frontend."""
+        if not wav_bytes or len(wav_bytes) < 44:
+            return {"success": False, "error": "Invalid or empty WAV audio"}
+        if wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+            return {"success": False, "error": "PTT audio must be a real WAV container"}
+
+        fd, wav_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         try:
-            audio_data = sr.AudioData(pcm_bytes, 16000, 2)
-            res = self.stt_provider.transcribe_audio_data(audio_data)
+            with open(wav_path, "wb") as f:
+                f.write(wav_bytes)
+            res = self.stt_provider.transcribe_wav_file(wav_path)
             if res.get("success") and on_text_detected:
-                transcript = res.get("transcript", "")
-                on_text_detected(transcript)
+                on_text_detected(res.get("transcript", ""))
             return res
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        finally:
+            try:
+                os.unlink(wav_path)
+            except Exception:
+                pass

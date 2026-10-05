@@ -65,57 +65,146 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Float32Array[]>([]);
+  const sourceSampleRateRef = useRef<number>(48000);
+
+  const encodeWav16Mono = (chunks: Float32Array[], sourceRate: number, targetRate = 16000): Blob => {
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    chunks.forEach(c => { merged.set(c, offset); offset += c.length; });
+
+    const ratio = sourceRate / targetRate;
+    const outLength = Math.max(1, Math.floor(merged.length / ratio));
+    const resampled = new Float32Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const srcPos = i * ratio;
+      const left = Math.floor(srcPos);
+      const right = Math.min(left + 1, merged.length - 1);
+      const frac = srcPos - left;
+      resampled[i] = merged[left] * (1 - frac) + merged[right] * frac;
+    }
+
+    const buffer = new ArrayBuffer(44 + resampled.length * 2);
+    const view = new DataView(buffer);
+    const writeAscii = (pos: number, text: string) => {
+      for (let i = 0; i < text.length; i++) view.setUint8(pos + i, text.charCodeAt(i));
+    };
+    writeAscii(0, 'RIFF');
+    view.setUint32(4, 36 + resampled.length * 2, true);
+    writeAscii(8, 'WAVE');
+    writeAscii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, targetRate, true);
+    view.setUint32(28, targetRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeAscii(36, 'data');
+    view.setUint32(40, resampled.length * 2, true);
+
+    let p = 44;
+    for (let i = 0; i < resampled.length; i++, p += 2) {
+      const x = Math.max(-1, Math.min(1, resampled[i]));
+      view.setInt16(p, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+    }
+    return new Blob([buffer], { type: 'audio/wav' });
+  };
 
   const startPTT = async () => {
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const context = new AudioCtx();
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+
       audioChunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      sourceSampleRateRef.current = context.sampleRate;
+      processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        const input = event.inputBuffer.getChannelData(0);
+        audioChunksRef.current.push(new Float32Array(input));
       };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          const resStr = reader.result as string;
-          const base64 = resStr?.includes(',') ? resStr.split(',')[1] : resStr;
-          if (base64) {
-            setInternalCoreState('UNDERSTANDING');
-            setInternalStatusText('Transcribing speech...');
-            try {
-              const res = await MayaApi.sendPttAudio(base64);
-              if (res.success && res.transcript) {
-                handleSend(res.transcript);
-              } else {
-                setInternalCoreState('IDLE');
-                setInternalStatusText('No speech detected.');
-              }
-            } catch (err) {
-              setInternalCoreState('IDLE');
-            }
-          }
-        };
-        reader.readAsDataURL(blob);
-      };
-      recorder.start();
-      mediaRecorderRef.current = recorder;
+      source.connect(processor);
+      processor.connect(context.destination);
+
+      audioContextRef.current = context;
+      audioProcessorRef.current = processor;
+      audioSourceRef.current = source;
+      mediaStreamRef.current = stream;
+
       setIsPTTActive(true);
       setInternalCoreState('LISTENING');
       setInternalStatusText('Listening... (release to send)');
     } catch (err) {
       console.warn('Microphone access denied or unavailable', err);
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Microphone unavailable.');
     }
   };
 
-  const stopPTT = () => {
-    if (mediaRecorderRef.current && isPTTActive) {
-      mediaRecorderRef.current.stop();
-      setIsPTTActive(false);
+  const stopPTT = async () => {
+    if (!isPTTActive) return;
+    setIsPTTActive(false);
+
+    try {
+      audioProcessorRef.current?.disconnect();
+      audioSourceRef.current?.disconnect();
+      mediaStreamRef.current?.getTracks().forEach(t => t.stop());
+
+      const blob = encodeWav16Mono(
+        audioChunksRef.current,
+        sourceSampleRateRef.current,
+        16000
+      );
+
+      if (audioContextRef.current) {
+        await audioContextRef.current.close();
+      }
+
+      audioContextRef.current = null;
+      audioProcessorRef.current = null;
+      audioSourceRef.current = null;
+      mediaStreamRef.current = null;
+
+      setInternalCoreState('UNDERSTANDING');
+      setInternalStatusText('Transcribing speech...');
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const resStr = reader.result as string;
+          const base64 = resStr.includes(',') ? resStr.split(',')[1] : resStr;
+          const res = await MayaApi.sendPttAudio(base64);
+          if (res.success && res.transcript) {
+            setInternalStatusText(`Heard: "${res.transcript}"`);
+            await handleSend(res.transcript);
+          } else {
+            setInternalCoreState('IDLE');
+            setInternalStatusText(res.error || 'No speech detected.');
+          }
+        } catch (err) {
+          setInternalCoreState('ERROR');
+          setInternalStatusText('Speech transcription failed.');
+        }
+      };
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Could not process microphone audio.');
     }
   };
 
@@ -125,8 +214,8 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   const activeStatusText = externalStatusText || internalStatusText;
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, activeStatusText]);
+    messagesEndRef.current?.scrollIntoView({ behavior: isProcessing ? 'auto' : 'smooth' });
+  }, [messages, activeStatusText, isProcessing]);
 
   const toggleDetails = (id: string) => {
     setExpandedDetails(prev => ({ ...prev, [id]: !prev[id] }));
@@ -143,7 +232,6 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // Add user message if new
     if (!textToSend) {
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
@@ -156,17 +244,50 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
     setIsProcessing(true);
     setInternalCoreState('THINKING');
-    setInternalSubState('PLAN');
-    setInternalStatusText('Formulating plan...');
+    setInternalSubState('ANALYZE');
+    setInternalStatusText('Thinking...');
+
+    let streamMessageId: string | null = null;
+    let streamedText = '';
 
     try {
-      const resp: ChatResponse = await MayaApi.sendChatMessage(text, permissionToken);
+      const resp: ChatResponse = await MayaApi.sendChatMessageStream(
+        text,
+        permissionToken,
+        (delta: string) => {
+          if (!delta) return;
+          streamedText += delta;
+          setInternalStatusText('Maya is responding...');
+
+          if (!streamMessageId) {
+            streamMessageId = `maya-stream-${Date.now()}`;
+            const streamingMsg: ChatMessage = {
+              id: streamMessageId,
+              sender: 'maya',
+              text: streamedText,
+              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              waveform: false
+            };
+            setMessages(prev => [...prev, streamingMsg]);
+          } else {
+            const id = streamMessageId;
+            setMessages(prev =>
+              prev.map(msg => msg.id === id ? { ...msg, text: streamedText } : msg)
+            );
+          }
+        }
+      );
 
       if (resp.tasks && resp.tasks.length > 0) {
         onTasksUpdate?.(resp.tasks);
       }
 
       if (resp.requires_confirmation) {
+        if (streamMessageId) {
+          const id = streamMessageId;
+          setMessages(prev => prev.filter(msg => msg.id !== id));
+        }
+
         setInternalCoreState('WARNING');
         setInternalStatusText('Authorization required for execution.');
 
@@ -186,15 +307,22 @@ export const ChatStage: React.FC<ChatStageProps> = ({
         return;
       }
 
-      setInternalCoreState('EXECUTING');
-      setInternalSubState('EXECUTE');
-      setInternalStatusText('Executing & verifying...');
-
-      setTimeout(() => {
-        setInternalCoreState('SUCCESS');
-        setInternalSubState('VERIFY');
-        setInternalStatusText('Verified and complete.');
-
+      if (streamMessageId) {
+        const id = streamMessageId;
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === id
+              ? {
+                  ...msg,
+                  text: resp.reply || streamedText,
+                  details: resp.details,
+                  tasks: resp.tasks,
+                  waveform: true
+                }
+              : msg
+          )
+        );
+      } else {
         const mayaMsg: ChatMessage = {
           id: `maya-${Date.now()}`,
           sender: 'maya',
@@ -204,33 +332,42 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           tasks: resp.tasks,
           waveform: true
         };
-
         setMessages(prev => [...prev, mayaMsg]);
-        onActionCompleted?.();
+      }
 
-        setTimeout(() => {
-          setInternalCoreState('IDLE');
-          setInternalStatusText('Ready for your command.');
-          setIsProcessing(false);
-        }, 2200);
-      }, 500);
+      onActionCompleted?.();
+      setInternalCoreState('IDLE');
+      setInternalSubState('VERIFY');
+      setInternalStatusText('Ready for your command.');
+      setIsProcessing(false);
 
     } catch (err: any) {
       setInternalCoreState('ERROR');
       setInternalStatusText('Service error.');
       setIsProcessing(false);
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `maya-err-${Date.now()}`,
-          sender: 'maya',
-          text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }
-      ]);
+
+      if (streamMessageId) {
+        const id = streamMessageId;
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === id
+              ? { ...msg, text: streamedText || 'The response stream was interrupted.' }
+              : msg
+          )
+        );
+      } else {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `maya-err-${Date.now()}`,
+            sender: 'maya',
+            text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }
+        ]);
+      }
     }
   };
-
   const handleConfirmAction = async (msgId: string, confirmationId: string, approved: boolean, planId?: string) => {
     // Mark confirmation handled in UI
     setMessages(prev =>

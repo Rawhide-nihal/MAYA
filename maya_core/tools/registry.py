@@ -195,7 +195,11 @@ class ToolRegistry:
             "list_processes": lambda filter=None, **kw: {"success": True, "processes": windows.list_processes(limit=15), "verified": True},
             "get_recent_actions": lambda limit=15, **kw: {"success": True, "actions": ledger.get_recent_actions(limit=limit), "verified": True},
             "search_memory": lambda query, **kw: {"success": True, "results": memory.search_relevant_memories(query), "verified": True},
-            "open_application": lambda application, path=None, **kw: windows.launch_application(application),
+            "open_application": lambda application, path=None, profile=None, **kw: windows.launch_application(
+                application,
+                arguments=[path] if path else None,
+                profile=profile
+            ),
             "open_application_and_inspect": lambda application, project_path=None, **kw: {
                 "success": windows.launch_application(application).get("success", False),
                 "application": application,
@@ -353,8 +357,14 @@ def build_default_tool_registry() -> ToolRegistry:
         description="Launches or focuses an authorized application executable and verifies its process launch.",
         category="windows",
         parameters=[
-            ToolParameter("application", "string", "Application name (e.g. 'Visual Studio Code', 'Notepad')", required=True),
-            ToolParameter("path", "string", "Optional target file or workspace directory to open", required=False)
+            ToolParameter("application", "string", "Application name (e.g. 'Visual Studio Code', 'Google Chrome', 'Notepad')", required=True),
+            ToolParameter("path", "string", "Optional target file or workspace directory to open", required=False),
+            ToolParameter(
+                "profile",
+                "string",
+                "Optional browser profile hint such as 'main', a Chrome profile name, directory, or signed-in account email",
+                required=False
+            )
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
         undo_available=False
