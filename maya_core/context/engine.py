@@ -417,6 +417,18 @@ class UnifiedContextEngine:
             if record:
                 return {"kind": "screenshot", "value": record, "label": raw}
 
+        if any(word in raw for word in ["file", "document"]):
+            snapshot = self.last_snapshot or self.snapshot(include_processes=False)
+            active_process = str(snapshot.get("active_process") or "").lower()
+            selected_files = snapshot.get("selected_files") or []
+            if selected_files and ("explorer" in active_process or "file explorer" in str(snapshot.get("active_window_title") or "").lower()):
+                return {
+                    "kind": "file",
+                    "value": str(selected_files[0]),
+                    "label": raw,
+                    "resolution": "active_explorer_selection",
+                }
+
         if any(word in raw for word in ["attachment", "file", "document"]) and self.attachments:
             return {"kind": "attachment", "value": self.attachments[-1], "label": raw}
 
