@@ -27,11 +27,9 @@ requests>=2.31.0
 urllib3>=2.0.0
 
 
-# Voice: accurate local STT + natural local female TTS
+# Optional voice dependencies live in requirements-voice.txt.
+# Core/chat must install independently of Python-version-specific voice packages.
 SpeechRecognition>=3.10.0
-faster-whisper>=1.1.0
-kokoro>=0.9.4
-soundfile>=0.12.1
 
 # Browser parsing
 beautifulsoup4>=4.12.0
