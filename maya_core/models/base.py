@@ -175,6 +175,30 @@ class DeterministicIntentClassifier:
                 "summary": f"Send {service} message to {recipient.strip()}"
             }
 
+        # Open authenticated communication services in the user's main Chrome profile.
+        service_open = re.search(
+            r"\b(?:open|launch|start)\s+(?:my\s+)?(gmail|whatsapp|telegram)(?:\s+(?:in|on|from)\s+(?:google\s+)?chrome)?\b",
+            lower
+        )
+        if service_open:
+            service = service_open.group(1)
+            urls = {
+                "gmail": "https://mail.google.com/mail/",
+                "whatsapp": "https://web.whatsapp.com/",
+                "telegram": "https://web.telegram.org/k/"
+            }
+            return {
+                "intent": "PC_ACTION",
+                "tool": "open_application",
+                "arguments": {
+                    "application": "Google Chrome",
+                    "profile": "main",
+                    "path": urls[service]
+                },
+                "confidence": 0.98,
+                "summary": f"Open {service.title()} in the main Chrome profile"
+            }
+
         # Check for open application (VS Code, Notepad, Chrome, Explorer, Terminal, etc.)
         match_app = re.search(r"\b(?:open|launch|start|run)\s+(?:application\s+|app\s+)?([a-zA-Z0-9\s\.\-_]+?)(?:\s+and\s+|\s*$|\.|\?)", lower)
         if match_app:
