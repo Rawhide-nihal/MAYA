@@ -112,7 +112,7 @@ class ContextBuilder:
         live_context = {}
         if self.unified_context is not None:
             try:
-                live_context = self.unified_context.snapshot(include_processes=False)
+                live_context = self.unified_context.snapshot(include_processes=True)
             except Exception:
                 live_context = {}
 
