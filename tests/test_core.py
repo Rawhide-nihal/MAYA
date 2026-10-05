@@ -126,6 +126,20 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r6["arguments"]["profile"], "main")
         self.assertIn("web.whatsapp.com", r6["arguments"]["path"])
 
+        r7 = self.classifier.classify_and_extract(
+            "Send Rahul a WhatsApp message saying I fixed it"
+        )
+        self.assertEqual(r7["tool"], "send_communication")
+        self.assertEqual(r7["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r7["arguments"]["message"], "I fixed it")
+
+        r8 = self.classifier.classify_and_extract(
+            "Draft an email to friend@example.com saying Project is ready"
+        )
+        self.assertEqual(r8["tool"], "prepare_communication")
+        self.assertEqual(r8["arguments"]["service"], "gmail")
+        self.assertEqual(r8["arguments"]["recipient"], "friend@example.com")
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
