@@ -16,7 +16,7 @@ from typing import Any, Deque, Dict, List, Optional
 
 from PIL import Image, ImageChops, ImageStat
 
-from maya_core.config import CACHE_DIR, SCREENSHOTS_DIR
+from maya_core.config import CACHE_DIR, SCREENSHOTS_DIR, settings
 
 
 class UnifiedContextEngine:
@@ -87,10 +87,24 @@ class UnifiedContextEngine:
     def snapshot(self, include_processes: bool = False) -> Dict[str, Any]:
         active = self._active_window()
         clipboard = ""
+        if settings.get("context_clipboard_enabled", True):
+            try:
+                clipboard = self.windows.get_clipboard() or ""
+            except Exception:
+                pass
+
+        battery = None
         try:
-            clipboard = self.windows.get_clipboard() or ""
+            import psutil
+            sensor = psutil.sensors_battery()
+            if sensor is not None:
+                battery = {
+                    "percent": round(float(sensor.percent), 1),
+                    "plugged": bool(sensor.power_plugged),
+                    "seconds_left": getattr(sensor, "secsleft", None),
+                }
         except Exception:
-            pass
+            battery = None
 
         recent_actions = []
         if self.ledger is not None:
@@ -105,8 +119,9 @@ class UnifiedContextEngine:
             "active_window": active,
             "active_window_title": active.get("title", ""),
             "clipboard": clipboard[:4000],
-            "recent_files": self._recent_files(),
+            "recent_files": self._recent_files() if settings.get("context_recent_files_enabled", True) else [],
             "recent_actions": recent_actions,
+            "battery": battery,
             "latest_screenshot": self.screenshots[-1] if self.screenshots else None,
             "previous_screenshot": self.screenshots[-2] if len(self.screenshots) > 1 else None,
             "latest_attachment": self.attachments[-1] if self.attachments else None,
@@ -307,6 +322,18 @@ class UnifiedContextEngine:
         if recent_files:
             parts.append("- Recent files: " + "; ".join(item["name"] for item in recent_files[:5]))
 
+        battery = snapshot.get("battery")
+        if battery:
+            parts.append(
+                f"- Battery: {battery.get('percent')}% "
+                f"({'plugged in' if battery.get('plugged') else 'on battery'})"
+            )
+
+        recent_actions = snapshot.get("recent_actions") or []
+        failed_actions = [a for a in recent_actions if str(a.get("status", "")).lower() == "failed"]
+        if failed_actions:
+            parts.append(f"- Recent failed actions: {len(failed_actions)}")
+
         latest = snapshot.get("latest_screenshot")
         if latest:
             parts.append(
@@ -325,6 +352,9 @@ class UnifiedContextEngine:
                 f"- Latest attachment: {attachment.get('name') or attachment.get('path')} "
                 f"type={attachment.get('type', 'unknown')}"
             )
+            context_text = str(attachment.get("context_text") or "")
+            if context_text:
+                parts.append("- Attachment context:\n" + context_text[:10000])
 
         parts.append(
             "- Resolve words like 'this', 'that', 'it', 'before', 'previous' using this live session context when unambiguous. "
