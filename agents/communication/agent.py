@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from urllib.parse import urlparse
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agents.communication.bridge import CommunicationBridge, communication_bridge
@@ -73,7 +74,7 @@ class CommunicationAgent:
 
         expanded_attachment = None
         if attachment_path:
-            expanded_attachment = os.path.abspath(os.path.expanduser(attachment_path))
+            expanded_attachment = str(Path(attachment_path).expanduser().resolve())
             if not os.path.isfile(expanded_attachment):
                 return {
                     "success": False,
