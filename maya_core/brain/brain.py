@@ -18,6 +18,7 @@ from maya_core.tools.registry import default_tool_registry
 from memory.store import MemoryStore
 from security.permissions.tier import PermissionManager
 from security.audit.ledger import ActionLedger
+from maya_core.personality.engine import PersonalityEngine
 
 class MayaBrain:
     def __init__(
@@ -27,7 +28,9 @@ class MayaBrain:
         memory: MemoryStore,
         permissions: PermissionManager,
         ledger: ActionLedger,
-        runtime: Optional[MayaModelRuntime] = None
+        runtime: Optional[MayaModelRuntime] = None,
+        unified_context=None,
+        personality: Optional[PersonalityEngine] = None
     ):
         self.context_builder = context_builder
         self.planner = planner
@@ -36,13 +39,171 @@ class MayaBrain:
         self.ledger = ledger
         self.runtime = runtime or model_runtime
         self.tool_registry = default_tool_registry
+        self.unified_context = unified_context
+        self.personality = personality or PersonalityEngine()
         # Deterministic classifier reserved as emergency safety fallback
         self.fallback_classifier = DeterministicIntentClassifier()
 
+    def _is_context_command(self, user_text: str) -> bool:
+        lower = (user_text or "").strip().lower()
+        if self.personality.parse_mode_command(lower):
+            return True
+        patterns = [
+            "take a screenshot", "take screenshot", "capture screenshot",
+            "save that screenshot", "save this screenshot", "keep that screenshot",
+            "keep this screenshot", "compare this with before", "compare with before",
+            "compare screenshots", "look at my screen", "check my screen",
+            "what's on my screen", "what is on my screen", "what's this error",
+            "what is this error", "read this page", "where should i click",
+            "what am i doing", "what's open", "what is open"
+        ]
+        return any(p in lower for p in patterns)
+
+    def _handle_context_command(self, user_text: str) -> Optional[Dict[str, Any]]:
+        cleaned = (user_text or "").strip()
+        lower = cleaned.lower()
+
+        mode = self.personality.parse_mode_command(cleaned)
+        if mode:
+            self.personality.set_mode(mode.value)
+            reply = f"{self.personality.describe_mode(mode)} Ready, Boss."
+            return {
+                "intent": "MODE_CHANGE",
+                "reply": reply,
+                "mode": mode.value,
+                "executed_tool": None,
+                "tasks": [],
+                "verified": True,
+                "timestamp": time.time(),
+            }
+
+        if self.unified_context is None:
+            return None
+
+        if any(p in lower for p in ["take a screenshot", "take screenshot", "capture screenshot"]):
+            should_save = any(p in lower for p in ["keep it", "save it", "keep this", "save this"])
+            result = self.unified_context.capture_screen(save=should_save)
+            if result.get("success"):
+                window = ((result.get("active_window") or {}).get("title") or "the current desktop")
+                reply = (
+                    f"Screenshot {'saved' if should_save else 'captured for this session'}, Boss. "
+                    f"The active window is {window}."
+                )
+            else:
+                reply = f"I couldn't capture the screen: {result.get('error', 'unknown capture error')}"
+            return {
+                "intent": "VISION_ACTION",
+                "reply": reply,
+                "executed_tool": "capture_screen",
+                "details": result,
+                "tasks": [],
+                "verified": bool(result.get("verified", result.get("success"))),
+                "timestamp": time.time(),
+            }
+
+        if any(p in lower for p in [
+            "save that screenshot", "save this screenshot", "keep that screenshot",
+            "keep this screenshot", "keep the screenshot", "save the screenshot"
+        ]):
+            result = self.unified_context.save_screenshot("latest")
+            reply = (
+                f"Saved it permanently, Boss: {result.get('saved_path')}"
+                if result.get("success")
+                else f"I couldn't save that screenshot: {result.get('error')}"
+            )
+            return {
+                "intent": "VISION_ACTION",
+                "reply": reply,
+                "executed_tool": "save_screenshot",
+                "details": result,
+                "tasks": [],
+                "verified": bool(result.get("verified")),
+                "timestamp": time.time(),
+            }
+
+        if any(p in lower for p in ["compare this with before", "compare with before", "compare screenshots"]):
+            result = self.unified_context.compare_screenshots("latest", "previous")
+            if result.get("success"):
+                reply = (
+                    f"I compared the latest capture with the previous one, Boss. "
+                    f"Pixel-level change is about {result.get('pixel_change_percent')}%. "
+                    f"Active window changed: {'yes' if result.get('active_window_changed') else 'no'}."
+                )
+                if result.get("newer_errors") and not result.get("older_errors"):
+                    reply += " A new visible error-window signal appeared in the latest capture."
+            else:
+                reply = f"I need two session screenshots to compare: {result.get('error')}"
+            return {
+                "intent": "VISION_COMPARE",
+                "reply": reply,
+                "executed_tool": "compare_screenshots",
+                "details": result,
+                "tasks": [],
+                "verified": bool(result.get("verified")),
+                "timestamp": time.time(),
+            }
+
+        screen_phrases = [
+            "look at my screen", "check my screen", "what's on my screen",
+            "what is on my screen", "what's this error", "what is this error",
+            "read this page", "where should i click"
+        ]
+        if any(p in lower for p in screen_phrases):
+            capture = self.unified_context.capture_screen(save=False)
+            if not capture.get("success"):
+                return {
+                    "intent": "VISION_ANALYSIS",
+                    "reply": f"I couldn't inspect the screen: {capture.get('error')}",
+                    "details": capture,
+                    "tasks": [],
+                    "timestamp": time.time(),
+                }
+            window = ((capture.get("active_window") or {}).get("title") or "Desktop")
+            errors = capture.get("visible_errors") or []
+            if errors:
+                error_text = "; ".join(str(e.get("description", "")) for e in errors[:3])
+                reply = f"I'm looking at {window}, Boss. I detected: {error_text}"
+            else:
+                reply = f"I'm looking at {window}, Boss. I don't see an error signal in the visible window titles."
+
+            if "read this page" in lower or "where should i click" in lower:
+                reply += (
+                    " The capture is in session context, but this local build does not yet have a general "
+                    "visual-language/OCR model, so I won't invent page text or click targets I cannot actually read."
+                )
+
+            return {
+                "intent": "VISION_ANALYSIS",
+                "reply": reply,
+                "executed_tool": "capture_screen",
+                "details": capture,
+                "tasks": [],
+                "verified": True,
+                "timestamp": time.time(),
+            }
+
+        if any(p in lower for p in ["what am i doing", "what's open", "what is open"]):
+            snapshot = self.unified_context.snapshot(include_processes=False)
+            title = snapshot.get("active_window_title") or "Desktop"
+            recent = snapshot.get("recent_files") or []
+            reply = f"You're currently focused on {title}, Boss."
+            if recent:
+                reply += " Your most recent local file is " + recent[0].get("name", "unknown") + "."
+            return {
+                "intent": "CONTEXT_QUERY",
+                "reply": reply,
+                "details": snapshot,
+                "tasks": [],
+                "verified": True,
+                "timestamp": time.time(),
+            }
+
+        return None
+
     def is_fast_conversation(self, user_text: str) -> bool:
-        """Return True only for ordinary conversation that does not map to a PC/tool action."""
+        """Return True only for ordinary conversation that does not map to an action/context command."""
         cleaned_query = (user_text or "").strip()
-        if not cleaned_query:
+        if not cleaned_query or self._is_context_command(cleaned_query):
             return False
         intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
         return (
@@ -63,6 +224,10 @@ class MayaBrain:
         self.memory.add_message("user", cleaned_query)
         self.planner.emit("maya.state.changed", {"state": "THINKING"})
         ctx = self.context_builder.build_chat_context(cleaned_query)
+        policy = self.personality.policy(
+            cleaned_query,
+            (ctx.get("context_metadata") or {}).get("live_context") or {}
+        )
 
         started_at = time.perf_counter()
         first_token_at: Optional[float] = None
@@ -75,8 +240,8 @@ class MayaBrain:
             for chunk in self.runtime.stream_generate(
                 cleaned_query,
                 system_prompt=ctx["prompt"],
-                max_new_tokens=96,
-                temperature=0.6,
+                max_new_tokens=policy.max_new_tokens,
+                temperature=policy.temperature,
                 top_p=0.9,
             ):
                 if not chunk:
@@ -180,6 +345,12 @@ class MayaBrain:
         if not cleaned_query:
             return {"error": "Empty query"}
 
+        direct_context = self._handle_context_command(cleaned_query)
+        if direct_context is not None:
+            self.memory.add_message("user", cleaned_query)
+            self.memory.add_message("maya", direct_context.get("reply", ""))
+            return direct_context
+
         # 1. Store user message in episodic memory
         self.memory.add_message("user", cleaned_query)
 
@@ -190,12 +361,16 @@ class MayaBrain:
         if not detected_tool and intent in ["QUESTION", "SUGGESTION", "CHAT"]:
             self.planner.emit("maya.state.changed", {"state": "THINKING"})
             ctx = self.context_builder.build_chat_context(cleaned_query)
+            policy = self.personality.policy(
+                cleaned_query,
+                (ctx.get("context_metadata") or {}).get("live_context") or {}
+            )
             try:
                 raw_chat = self.runtime.generate(
                     cleaned_query,
                     system_prompt=ctx["prompt"],
-                    max_new_tokens=96,
-                    temperature=0.6,
+                    max_new_tokens=policy.max_new_tokens,
+                    temperature=policy.temperature,
                     top_p=0.9,
                 ).strip()
                 reply = self._extract_conversation_text(raw_chat)
@@ -430,7 +605,12 @@ class MayaBrain:
         try:
             synth_reply = self.runtime.generate(
                 prompt=synth_prompt,
-                system_prompt="You are MAYA, reporting verified execution results to your user."
+                system_prompt=(
+                    "You are MAYA, reporting verified execution results to your user. "
+                    + self.personality.prompt_fragment(user_query)
+                ),
+                max_new_tokens=96,
+                temperature=0.45,
             )
             if synth_reply and synth_reply.strip() and not synth_reply.startswith("{"):
                 return synth_reply.strip()
