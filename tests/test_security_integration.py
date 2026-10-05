@@ -65,7 +65,12 @@ class TestSecurityIntegration(unittest.TestCase):
 
     # 5. Trusted Origin headers are allowed
     def test_trusted_origin_allowed(self):
-        for origin in ["http://localhost:5173", "http://127.0.0.1:5173", "app://maya"]:
+        for origin in [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "app://maya",
+            "chrome-extension://cbffklcgjeagclgldpkiflcbgbmjgohh"
+        ]:
             headers = {
                 "X-Maya-Token": AUTH_TOKEN,
                 "Origin": origin,
@@ -161,6 +166,29 @@ class TestSecurityIntegration(unittest.TestCase):
         # Must be rejected because args_hash does not match!
         self.assertFalse(tampered_dec.granted)
         self.assertTrue(tampered_dec.requires_confirmation)
+
+    def test_send_communication_requires_exact_confirmation(self):
+        test_pm = PermissionManager(PermissionLevel.LEVEL_2_SAFE_ACTION)
+        original_args = {
+            "service": "gmail",
+            "recipient": "friend@example.com",
+            "message": "Original message",
+            "profile": "main"
+        }
+
+        decision = test_pm.check_permission("send_communication", original_args)
+        self.assertFalse(decision.granted)
+        self.assertTrue(decision.requires_confirmation)
+
+        token = test_pm.resolve_confirmation(decision.confirmation_id, approved=True)
+        self.assertIsNotNone(token)
+
+        tampered_args = dict(original_args)
+        tampered_args["recipient"] = "different@example.com"
+        tampered = test_pm.check_permission("send_communication", tampered_args, token=token)
+
+        self.assertFalse(tampered.granted)
+        self.assertTrue(tampered.requires_confirmation)
 
     # 11. Plan Resume Security: Expired Token Rejection
     def test_expired_token_rejection(self):
