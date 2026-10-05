@@ -13,6 +13,7 @@ import winreg
 import psutil
 import ctypes
 import threading
+import struct
 from typing import Dict, Any, List, Optional
 from maya_core.models.hardware_detector import get_real_gpu_metrics
 
@@ -369,7 +370,22 @@ class WindowsAgent:
             win32clipboard.OpenClipboard()
             opened = True
             win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(win32con.CF_HDROP, (path,))
+
+            # CF_HDROP requires a DROPFILES header followed by a double-null
+            # terminated UTF-16LE list of fully-qualified paths.
+            file_list = path + "\0\0"
+            payload = (
+                struct.pack(
+                    "<IiiII",
+                    20,   # pFiles offset = sizeof(DROPFILES)
+                    0,    # pt.x
+                    0,    # pt.y
+                    0,    # fNC
+                    1,    # fWide (Unicode)
+                )
+                + file_list.encode("utf-16le")
+            )
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, payload)
         except Exception as exc:
             return {
                 **resolved,
