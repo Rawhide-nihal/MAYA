@@ -40,24 +40,26 @@
     else M.setEditableText(search, recipient);
 
     await M.sleep(900);
-    const exact = M.exactTextElements(recipient, '[title], span, div')
-      .filter(el => {
-        const title = M.normalize(el.getAttribute('title'));
-        return !title || title === M.normalize(recipient);
-      });
+    const resultPane = document.querySelector('#pane-side') || document;
+    const target = M.normalize(recipient);
+    const titled = Array.from(resultPane.querySelectorAll('[title]'))
+      .filter(M.visible)
+      .filter(el => M.normalize(el.getAttribute('title')) === target);
 
-    const unique = Array.from(new Set(exact));
-    if (unique.length !== 1) {
+    const rows = Array.from(new Set(
+      titled.map(el => el.closest('[role="listitem"], [role="button"], div[tabindex="-1"]') || el)
+    ));
+
+    if (rows.length !== 1) {
       return {
         ok: false,
-        error: unique.length === 0
+        error: rows.length === 0
           ? `No exact WhatsApp contact named “${recipient}” was found.`
           : `Multiple WhatsApp matches exist for “${recipient}”. MAYA refused to guess.`
       };
     }
 
-    const clickable = unique[0].closest('[role="listitem"], [role="button"]') || unique[0];
-    clickable.click();
+    rows[0].click();
     return { ok: true };
   }
 
@@ -105,7 +107,8 @@
       sent: Boolean(emptied),
       service: 'whatsapp',
       recipient,
-      error: emptied ? undefined : 'WhatsApp did not reach a verified sent state.'
+      send_attempted: true,
+      error: emptied ? undefined : 'MAYA clicked Send, but WhatsApp did not expose a verified sent state. Check the conversation before retrying to avoid duplicates.'
     };
   }
 
