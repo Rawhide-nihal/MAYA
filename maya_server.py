@@ -85,7 +85,10 @@ attachment_intelligence = AttachmentIntelligence()
 
 planner = DynamicTaskPlanner(
     permissions, ledger, memory, windows, terminal, filesystem,
-    developer, diagnostics, vision, browser, communication=communication, event_callback=dispatch_event
+    developer, diagnostics, vision, browser,
+    communication=communication,
+    unified_context=unified_context,
+    event_callback=dispatch_event
 )
 
 voice = VoiceEngine(event_emitter=dispatch_event)
