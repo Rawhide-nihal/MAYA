@@ -157,6 +157,33 @@ class PersonalityEngine:
             temperature=temperature,
         )
 
+    def contextual_humor_cues(self, context: Optional[Dict[str, Any]]) -> list[str]:
+        """Derive humor opportunities only from real observed session state."""
+        context = context or {}
+        cues: list[str] = []
+
+        battery = context.get("battery") or {}
+        try:
+            battery_percent = float(battery.get("percent"))
+        except (TypeError, ValueError):
+            battery_percent = None
+        if battery_percent is not None and battery_percent <= 5 and not battery.get("plugged"):
+            cues.append(f"Battery is genuinely low at {battery_percent:.0f}%.")
+
+        recent_actions = context.get("recent_actions") or []
+        statuses = [str(a.get("status", "")).lower() for a in recent_actions if isinstance(a, dict)]
+        failed_count = statuses.count("failed")
+        if failed_count >= 2:
+            cues.append(f"There have been {failed_count} recent failed actions.")
+        if statuses and statuses[0] == "success" and "failed" in statuses[1:]:
+            cues.append("A recent action succeeded after earlier failures.")
+
+        active_title = str(context.get("active_window_title") or "").lower()
+        if "chrome" in active_title:
+            cues.append("Chrome is the active application.")
+
+        return cues
+
     def prompt_fragment(self, text: str, context: Optional[Dict[str, Any]] = None) -> str:
         p = self.policy(text, context)
         mode_rules = {
@@ -180,6 +207,14 @@ class PersonalityEngine:
             ResponseDepth.DEEP: "Provide a thorough analysis with structure, trade-offs, failure cases, and concrete next steps.",
         }[p.depth]
 
+        cues = self.contextual_humor_cues(context)
+        cue_text = ""
+        if cues:
+            cue_text = (
+                "- Real contextual event cues: " + " ".join(cues) + "\n"
+                "- If humor is allowed, MAYA may make at most one brief joke tied to a real cue; never invent a cue.\n"
+            )
+
         return (
             "\nMAYA PERSONALITY POLICY:\n"
             "- Address the user as 'Boss' naturally and occasionally, not in every sentence.\n"
@@ -187,7 +222,8 @@ class PersonalityEngine:
             f"- Mode: {p.mode.value}. {mode_rules[p.mode]}\n"
             f"- Situation severity: {p.severity}. {humor_rule}\n"
             f"- Response depth: {p.depth.value}. {depth_rule}\n"
-            "- Never let personality override truthfulness, permissions, or action verification.\n"
+            + cue_text
+            + "- Never let personality override truthfulness, permissions, or action verification.\n"
         )
 
     def describe_mode(self, mode: MayaMode) -> str:
