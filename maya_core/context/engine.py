@@ -6,6 +6,7 @@ resolution without persisting sensitive transient context by default.
 from __future__ import annotations
 
 import os
+import atexit
 import re
 import shutil
 import time
@@ -28,14 +29,42 @@ class UnifiedContextEngine:
         self.ledger = ledger
         self.browser_context_source = browser_context_source
         self.session_id = uuid.uuid4().hex[:12]
-        self.session_dir = CACHE_DIR / "sessions" / self.session_id
+        sessions_root = CACHE_DIR / "sessions"
+        sessions_root.mkdir(parents=True, exist_ok=True)
+        self._cleanup_stale_sessions(sessions_root)
+
+        self.session_dir = sessions_root / self.session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
+        atexit.register(self.cleanup)
 
         self.screenshots: Deque[Dict[str, Any]] = deque(maxlen=20)
         self.attachments: Deque[Dict[str, Any]] = deque(maxlen=20)
         self.entities: Deque[Dict[str, Any]] = deque(maxlen=40)
         self.named_refs: Dict[str, Dict[str, Any]] = {}
         self.last_snapshot: Dict[str, Any] = {}
+
+    @staticmethod
+    def _cleanup_stale_sessions(sessions_root: Path, max_age_seconds: int = 24 * 60 * 60) -> None:
+        cutoff = time.time() - max_age_seconds
+        try:
+            for child in sessions_root.iterdir():
+                if not child.is_dir():
+                    continue
+                try:
+                    if child.stat().st_mtime < cutoff:
+                        shutil.rmtree(child, ignore_errors=True)
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    def cleanup(self) -> None:
+        """Remove transient screenshots/attachments for this runtime session."""
+        try:
+            if self.session_dir.exists():
+                shutil.rmtree(self.session_dir, ignore_errors=True)
+        except Exception:
+            pass
 
     def _active_window(self) -> Dict[str, Any]:
         try:
