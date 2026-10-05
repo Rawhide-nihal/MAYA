@@ -144,6 +144,14 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r8["arguments"]["service"], "gmail")
         self.assertEqual(r8["arguments"]["recipient"], "friend@example.com")
 
+        r9 = self.classifier.classify_and_extract(
+            "Send this screenshot to Rahul on WhatsApp"
+        )
+        self.assertEqual(r9["tool"], "send_communication")
+        self.assertEqual(r9["arguments"]["service"], "whatsapp")
+        self.assertEqual(r9["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r9["arguments"]["attachment_path"].lower(), "this screenshot")
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
@@ -466,6 +474,21 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(fake_windows.calls[0]["app_name"], "Google Chrome")
         self.assertEqual(fake_windows.calls[0]["profile"], "main")
 
+        attachment = Path(self.temp_dir.name) / "capture.png"
+        attachment.write_bytes(b"test attachment bytes")
+        result_with_attachment = agent.send(
+            service="whatsapp",
+            recipient="Rahul",
+            message="",
+            profile="main",
+            attachment_path=str(attachment)
+        )
+        self.assertTrue(result_with_attachment["success"])
+        self.assertEqual(
+            fake_bridge.command["attachment_path"],
+            str(attachment.resolve())
+        )
+
     def test_v5_personality_modes_and_adaptive_depth(self):
         from maya_core.config import settings
 
@@ -606,6 +629,12 @@ class TestMayaPhase2Core(unittest.TestCase):
         })
         self.assertEqual(context.resolve_reference("this")["kind"], "attachment")
         self.assertEqual(context.resolve_reference("this screenshot")["kind"], "screenshot")
+
+        self.brain.unified_context = context
+        resolved_args = self.brain._resolve_argument_references({
+            "attachment_path": "this file"
+        })
+        self.assertEqual(resolved_args["attachment_path"], "C:/tmp/report.pdf")
 
         comparison = context.compare_screenshots("latest", "previous")
         self.assertTrue(comparison["success"])
