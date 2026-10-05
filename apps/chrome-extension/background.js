@@ -43,6 +43,38 @@ async function pollForCommand(service, tabId) {
   }
 }
 
+async function reportActiveTabContext() {
+  try {
+    const token = await getToken();
+    const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const tab = tabs?.[0];
+    if (!tab) return;
+
+    const response = await fetch(`${MAYA_API}/browser/context`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Maya-Token': token
+      },
+      body: JSON.stringify({
+        title: tab.title || '',
+        url: tab.url || '',
+        tab_id: tab.id ?? null,
+        window_id: tab.windowId ?? null
+      })
+    });
+
+    if (response.status === 401) {
+      sessionToken = null;
+    }
+  } catch {
+    // MAYA may be offline or Chrome may hide metadata for protected pages.
+  }
+}
+
+setInterval(reportActiveTabContext, 1500);
+reportActiveTabContext();
+
 async function postResult(commandId, result) {
   try {
     const token = await getToken();
