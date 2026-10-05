@@ -123,11 +123,19 @@ class UnifiedContextEngine:
             except Exception:
                 browser_context = {}
 
+        selected_files = []
+        try:
+            selected_files = self.windows.get_explorer_selection()
+        except Exception:
+            selected_files = []
+
         snapshot: Dict[str, Any] = {
             "timestamp": time.time(),
             "session_id": self.session_id,
             "active_window": active,
             "active_window_title": active.get("title", ""),
+            "active_process": active.get("process_name"),
+            "selected_files": selected_files,
             "clipboard": clipboard[:4000],
             "recent_files": self._recent_files() if settings.get("context_recent_files_enabled", True) else [],
             "recent_actions": recent_actions,
@@ -330,7 +338,13 @@ class UnifiedContextEngine:
         parts = ["\nLIVE MAYA CONTEXT:"]
         title = snapshot.get("active_window_title")
         if title:
-            parts.append(f"- Active window: {title}")
+            process_name = snapshot.get("active_process")
+            suffix = f" [process: {process_name}]" if process_name else ""
+            parts.append(f"- Active window: {title}{suffix}")
+
+        selected_files = snapshot.get("selected_files") or []
+        if selected_files:
+            parts.append("- Selected File Explorer item(s): " + "; ".join(selected_files[:8]))
 
         clipboard = snapshot.get("clipboard")
         if clipboard:
