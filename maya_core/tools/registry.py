@@ -199,6 +199,8 @@ class ToolRegistry:
             "list_processes": lambda filter=None, **kw: {"success": True, "processes": windows.list_processes(limit=15), "verified": True},
             "get_recent_actions": lambda limit=15, **kw: {"success": True, "actions": ledger.get_recent_actions(limit=limit), "verified": True},
             "search_memory": lambda query, **kw: {"success": True, "results": memory.search_relevant_memories(query), "verified": True},
+            "open_file": lambda filepath, **kw: windows.open_file(filepath),
+            "copy_file_to_clipboard": lambda filepath, **kw: windows.copy_file_to_clipboard(filepath),
             "open_application": lambda application, path=None, profile=None, **kw: windows.launch_application(
                 application,
                 arguments=[path] if path else None,
@@ -372,6 +374,28 @@ def build_default_tool_registry() -> ToolRegistry:
     ))
 
     # 2. Safe Actions (Level 2)
+    registry.register(ToolSchema(
+        name="open_file",
+        description="Opens a local file with the Windows associated application. Accepts exact paths or recent-file references such as 'latest screenshot', 'recent PNG', or 'latest file'.",
+        category="filesystem",
+        parameters=[
+            ToolParameter("filepath", "string", "File path or recent-file reference", required=True)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="copy_file_to_clipboard",
+        description="Places the actual local file on the Windows file clipboard so it can be pasted with Ctrl+V. Accepts exact paths or recent-file references.",
+        category="filesystem",
+        parameters=[
+            ToolParameter("filepath", "string", "File path or recent-file reference", required=True)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
     registry.register(ToolSchema(
         name="open_application",
         description="Launches or focuses an authorized application executable and verifies its process launch.",
