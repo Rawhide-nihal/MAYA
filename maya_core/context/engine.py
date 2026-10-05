@@ -345,6 +345,22 @@ class UnifiedContextEngine:
 
         newer_title = ((newer.get("active_window") or {}).get("title") or "")
         older_title = ((older.get("active_window") or {}).get("title") or "")
+
+        newer_ocr_lines = [
+            " ".join(str(line.get("text", "")).split())
+            for line in ((newer.get("ocr") or {}).get("lines") or [])
+            if str(line.get("text", "")).strip()
+        ]
+        older_ocr_lines = [
+            " ".join(str(line.get("text", "")).split())
+            for line in ((older.get("ocr") or {}).get("lines") or [])
+            if str(line.get("text", "")).strip()
+        ]
+        newer_set = set(newer_ocr_lines)
+        older_set = set(older_ocr_lines)
+        text_added = [line for line in newer_ocr_lines if line not in older_set][:80]
+        text_removed = [line for line in older_ocr_lines if line not in newer_set][:80]
+
         return {
             "success": True,
             "verified": True,
@@ -356,6 +372,9 @@ class UnifiedContextEngine:
             "active_window_changed": newer_title != older_title,
             "newer_window": newer_title,
             "older_window": older_title,
+            "ocr_text_change_detected": bool(text_added or text_removed),
+            "text_added": text_added,
+            "text_removed": text_removed,
             "newer_errors": newer.get("visible_errors", []),
             "older_errors": older.get("visible_errors", []),
         }
