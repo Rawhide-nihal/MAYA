@@ -76,7 +76,22 @@ class WindowsAgent:
         }
 
         # Allow a private local override without committing account data to Git.
-        local_override = os.environ.get("MAYA_CHROME_MAIN_PROFILE", "").strip()
+        # MAYA settings live under %LOCALAPPDATA%/Maya/settings.json, not in the repo.
+        configured_override = ""
+        try:
+            from maya_core.config import settings
+            configured_override = str(
+                settings.get("chrome_main_account", "")
+                or settings.get("chrome_main_profile", "")
+                or ""
+            ).strip()
+        except Exception:
+            configured_override = ""
+
+        local_override = (
+            configured_override
+            or os.environ.get("MAYA_CHROME_MAIN_PROFILE", "").strip()
+        )
         if hint in main_aliases and local_override:
             raw_hint = local_override
             hint = local_override.lower()
