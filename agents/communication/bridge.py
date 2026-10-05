@@ -82,7 +82,7 @@ class CommunicationBridge:
         result.setdefault("command_id", command_id)
         return result
 
-    def next_command(self, service: str) -> Optional[Dict[str, Any]]:
+    def next_command(self, service: str, tab_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
         service = service.lower().strip()
         if service not in self._queues:
             return None
@@ -90,17 +90,27 @@ class CommunicationBridge:
         self.heartbeat()
         with self._lock:
             queue = self._queues[service]
-            while queue:
+            attempts = len(queue)
+            for _ in range(attempts):
                 command_id = queue.popleft()
                 command = self._commands.get(command_id)
                 if not command or command.get("status") != "queued":
                     continue
+
+                target_tab_id = command.get("target_tab_id")
+                if target_tab_id is not None and int(target_tab_id) != int(tab_id or -1):
+                    # This command was explicitly bound to the Chrome tab that
+                    # was active when the user said "current chat".
+                    queue.append(command_id)
+                    continue
+
                 command["status"] = "dispatched"
                 command["dispatched_at"] = time.time()
 
                 # Never reveal an arbitrary local filesystem path to page content.
                 public_command = dict(command)
                 attachment_path = public_command.pop("attachment_path", None)
+                public_command.pop("target_tab_id", None)
                 if attachment_path:
                     public_command["has_attachment"] = True
                     public_command["attachment_name"] = os.path.basename(attachment_path)
