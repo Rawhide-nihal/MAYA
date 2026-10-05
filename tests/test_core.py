@@ -31,6 +31,9 @@ from agents.terminal.agent import TerminalAgent
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
 from agents.communication.agent import CommunicationAgent
+from maya_core.personality.engine import PersonalityEngine, MayaMode, ResponseDepth
+from maya_core.context.engine import UnifiedContextEngine
+from maya_core.attachments.intelligence import AttachmentIntelligence
 
 class TestMayaPhase2Core(unittest.TestCase):
     def setUp(self):
@@ -461,6 +464,159 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(fake_bridge.command["action"], "send")
         self.assertEqual(fake_windows.calls[0]["app_name"], "Google Chrome")
         self.assertEqual(fake_windows.calls[0]["profile"], "main")
+
+    def test_v5_personality_modes_and_adaptive_depth(self):
+        from maya_core.config import settings
+
+        original_mode = settings.get("maya_mode", "Normal")
+        try:
+            personality = PersonalityEngine()
+
+            mode = personality.parse_mode_command("Maya, focus mode")
+            self.assertEqual(mode, MayaMode.FOCUS)
+            personality.set_mode(mode.value)
+            self.assertEqual(personality.current_mode(), MayaMode.FOCUS)
+            self.assertEqual(
+                personality.response_depth("What is my CPU temperature?"),
+                ResponseDepth.QUICK
+            )
+
+            personality.set_mode("Normal")
+            self.assertEqual(
+                personality.response_depth("Go deep and analyze this entire project architecture"),
+                ResponseDepth.DEEP
+            )
+            self.assertEqual(
+                personality.severity("I think there is a security breach"),
+                "HIGH"
+            )
+            serious_prompt = personality.prompt_fragment("There is a security breach")
+            self.assertIn("Do not use humor", serious_prompt)
+        finally:
+            settings.set("maya_mode", original_mode)
+
+    def test_v5_attachment_intelligence_text_csv_and_project_zip(self):
+        import zipfile
+
+        analyzer = AttachmentIntelligence(max_text_chars=12000)
+
+        text_path = Path(self.temp_dir.name) / "sample.py"
+        text_path.write_text("import os\nprint('hello')\n", encoding="utf-8")
+        text_result = analyzer.analyze(str(text_path))
+        self.assertTrue(text_result["success"])
+        self.assertEqual(text_result["line_count"], 2)
+        self.assertIn("import os", text_result["extracted_text"])
+
+        csv_path = Path(self.temp_dir.name) / "sample.csv"
+        csv_path.write_text("name,value\nalpha,1\nbeta,2\n", encoding="utf-8")
+        csv_result = analyzer.analyze(str(csv_path))
+        self.assertTrue(csv_result["success"])
+        self.assertEqual(csv_result["column_count_max"], 2)
+
+        zip_path = Path(self.temp_dir.name) / "project.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr(
+                "project/package.json",
+                '{"name":"demo","dependencies":{"react":"^19.0.0"},"devDependencies":{"vite":"^7.0.0"}}'
+            )
+            archive.writestr(
+                "project/src/main.ts",
+                "import React from 'react';\nimport helper from './helper';\n"
+            )
+            archive.writestr("project/src/helper.ts", "export default 1;\n")
+
+        zip_result = analyzer.analyze(str(zip_path))
+        self.assertTrue(zip_result["success"])
+        self.assertGreaterEqual(zip_result["dependency_count"], 2)
+        self.assertIn("project/package.json", zip_result["dependencies"])
+        self.assertIn("project/src/main.ts", zip_result["source_relationships"])
+
+    def test_v5_unified_context_screenshot_history_and_references(self):
+        from PIL import Image
+
+        class FakeWindows:
+            def list_windows(self):
+                return [{
+                    "title": "Test Window",
+                    "hwnd": 1,
+                    "pid": 1,
+                    "process_name": "test.exe",
+                    "bounds": {}
+                }]
+
+            def _find_window_hwnd(self, query):
+                return 1
+
+            def get_clipboard(self):
+                return "clipboard text"
+
+            def get_explorer_selection(self):
+                return ["C:/tmp/selected.txt"]
+
+            def list_processes(self, limit=10):
+                return [{"pid": 1, "name": "test.exe"}]
+
+        class FakeVision:
+            def __init__(self, root):
+                self.root = Path(root)
+                self.counter = 0
+
+            def capture_screen(self, return_base64=False):
+                self.counter += 1
+                path = self.root / f"screen_{self.counter}.png"
+                value = 0 if self.counter == 1 else 255
+                Image.new("RGB", (20, 20), (value, value, value)).save(path)
+                return {
+                    "success": True,
+                    "filepath": str(path),
+                    "width": 20,
+                    "height": 20,
+                    "timestamp": time.time()
+                }
+
+            def detect_windows(self):
+                return [{
+                    "title": "Test Window",
+                    "hwnd": 1,
+                    "pid": 1,
+                    "bbox": [0, 0, 20, 20],
+                    "is_active": True
+                }]
+
+            def extract_visible_errors(self, screenshot_path=None):
+                return []
+
+        context = UnifiedContextEngine(
+            windows=FakeWindows(),
+            vision=FakeVision(self.temp_dir.name)
+        )
+        first = context.capture_screen(label="before test")
+        second = context.capture_screen()
+        self.assertTrue(first["success"])
+        self.assertTrue(second["success"])
+        self.assertEqual(context.resolve_reference("latest screenshot")["kind"], "screenshot")
+        self.assertEqual(context._find_screenshot("before test")["id"], first["id"])
+
+        comparison = context.compare_screenshots("latest", "previous")
+        self.assertTrue(comparison["success"])
+        self.assertTrue(comparison["visual_change_detected"])
+        self.assertGreater(comparison["pixel_change_percent"], 0)
+
+        snapshot = context.snapshot(include_processes=True)
+        self.assertEqual(snapshot["active_process"], "test.exe")
+        self.assertEqual(snapshot["selected_files"][0], "C:/tmp/selected.txt")
+        self.assertEqual(snapshot["clipboard"], "clipboard text")
+
+    def test_v5_compound_command_fallback(self):
+        decision = self.brain._compound_fallback_decision(
+            "Take a screenshot, then check my project for errors"
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.decision_type, "plan")
+        tools = [step.tool for step in decision.steps]
+        self.assertIn("capture_screen", tools)
+        self.assertIn("inspect_project", tools)
+        self.assertGreaterEqual(len(tools), 2)
 
     # 13. Phase 4: Neural Decision Extraction & Schema Validation
     def test_neural_decision_parser(self):
