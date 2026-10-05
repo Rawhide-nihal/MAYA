@@ -225,6 +225,21 @@ class DeterministicIntentClassifier:
                 "summary": f"Email {attachment_ref.strip()} to {recipient.strip()}"
             }
 
+        sync_contacts = re.match(
+            r"^(?:sync|refresh|update|load)\s+(?:my\s+)?(whatsapp|telegram)\s+(?:contacts|contact\s+list|chats|contacts\s+and\s+chats)$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if sync_contacts:
+            service = sync_contacts.group(1).lower()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "sync_communication_contacts",
+                "arguments": {"service": service, "profile": "main"},
+                "confidence": 0.99,
+                "summary": f"Synchronize local {service.title()} contacts and chats"
+            }
+
         # Authenticated communication fallback.
         # Conservative parsing keeps ambiguous recipients from being sent accidentally.
         email_subject = re.match(
