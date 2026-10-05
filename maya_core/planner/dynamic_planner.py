@@ -365,7 +365,7 @@ class DynamicTaskPlanner:
         }
 
     def resume_plan(self, plan_id: str, confirmation_id: str, permission_token: str) -> Dict[str, Any]:
-        """Resumes an exact suspended plan at its pending step with single-use permission validation."""
+        """Resume a suspended plan while preserving verification and partial-success semantics."""
         if plan_id not in self.active_plans:
             return {"success": False, "error": f"Plan '{plan_id}' not found in active plans."}
 
@@ -379,7 +379,6 @@ class DynamicTaskPlanner:
 
         step = plan.steps[curr_idx]
 
-        # Strict validation of bound single-use token
         valid, reason = self.permissions.validate_token_for_resume(
             token=permission_token,
             plan_id=plan.plan_id,
@@ -392,31 +391,65 @@ class DynamicTaskPlanner:
             self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": False, "error": reason})
             return {"success": False, "error": reason}
 
-        self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": True, "token": permission_token})
+        self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": True})
         self.emit("maya.state.changed", {"state": "EXECUTING", "plan_id": plan.plan_id})
 
-        # Execute the suspended step with verified authorization
+        partial_failures = []
+
+        # Execute the exact suspended step with its single-use authorization.
         step.state = StepState.RUNNING
-        self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "name": step.name})
+        step.started_at = step.started_at or time.time()
+        self.emit("tool.started", {
+            "plan_id": plan.plan_id,
+            "step_id": step.step_id,
+            "tool": step.tool,
+            "name": step.name
+        })
 
-        tool_res = self.execute_tool(step.tool, step.arguments, token=permission_token, plan_id=plan.plan_id)
+        tool_res = self.execute_tool(
+            step.tool,
+            step.arguments,
+            token=permission_token,
+            plan_id=plan.plan_id
+        )
         self.permissions.consume_token(permission_token)
-        is_success = tool_res.get("success", False)
-        is_verified = tool_res.get("verified", is_success)
 
+        is_success = tool_res.get("success", False)
         step.state = StepState.SUCCESS if is_success else StepState.FAILED
         step.result = tool_res
-        step.verified = is_verified
+        step.verified = tool_res.get("verified", is_success)
         step.completed_at = time.time()
 
         if not is_success:
-            self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "error": tool_res.get("error")})
-            plan.state = PlanState.FAILED
-            return {"success": False, "plan_id": plan.plan_id, "state": "FAILED", "error": tool_res.get("error")}
+            self.emit("tool.failed", {
+                "plan_id": plan.plan_id,
+                "step_id": step.step_id,
+                "tool": step.tool,
+                "error": tool_res.get("error")
+            })
+            if step.tool in self.NON_FATAL_FAILURE_TOOLS and curr_idx < len(plan.steps) - 1:
+                partial_failures.append({
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "error": tool_res.get("error", "Step failed")
+                })
+            else:
+                plan.state = PlanState.FAILED
+                return {
+                    "success": False,
+                    "plan_id": plan.plan_id,
+                    "state": plan.state.value,
+                    "error": tool_res.get("error"),
+                    "steps": [asdict(s) for s in plan.steps],
+                }
+        else:
+            self.emit("tool.completed", {
+                "plan_id": plan.plan_id,
+                "step_id": step.step_id,
+                "tool": step.tool
+            })
 
-        self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool})
-
-        # Continue remaining steps in plan
+        # Continue remaining steps. A later privileged step can suspend the same plan again.
         for idx in range(curr_idx + 1, len(plan.steps)):
             if plan.cancelled:
                 plan.steps[idx].state = StepState.CANCELLED
@@ -427,9 +460,19 @@ class DynamicTaskPlanner:
             next_step = plan.steps[idx]
             next_step.state = StepState.RUNNING
             next_step.started_at = time.time()
-            self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool, "name": next_step.name})
+            self.emit("tool.started", {
+                "plan_id": plan.plan_id,
+                "step_id": next_step.step_id,
+                "tool": next_step.tool,
+                "name": next_step.name
+            })
 
-            next_res = self.execute_tool(next_step.tool, next_step.arguments, plan_id=plan.plan_id)
+            next_res = self.execute_tool(
+                next_step.tool,
+                next_step.arguments,
+                plan_id=plan.plan_id
+            )
+
             if next_res.get("requires_confirmation"):
                 next_step.state = StepState.WAITING
                 next_step.requires_permission = True
@@ -443,9 +486,12 @@ class DynamicTaskPlanner:
                 return {
                     "success": False,
                     "plan_id": plan.plan_id,
-                    "state": "WAITING_FOR_PERMISSION",
+                    "state": plan.state.value,
                     "requires_confirmation": True,
-                    "confirmation_id": next_step.confirmation_id
+                    "confirmation_id": next_step.confirmation_id,
+                    "step": asdict(next_step),
+                    "steps": [asdict(s) for s in plan.steps],
+                    "partial_failures": partial_failures,
                 }
 
             step_ok = next_res.get("success", False)
@@ -454,23 +500,47 @@ class DynamicTaskPlanner:
             next_step.verified = next_res.get("verified", step_ok)
             next_step.completed_at = time.time()
 
-            if not step_ok:
-                self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool, "error": next_res.get("error")})
-                plan.state = PlanState.FAILED
-                break
-            self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool})
+            if step_ok:
+                self.emit("tool.completed", {
+                    "plan_id": plan.plan_id,
+                    "step_id": next_step.step_id,
+                    "tool": next_step.tool
+                })
+                continue
 
-        if plan.state != PlanState.FAILED and plan.state != PlanState.CANCELLED:
-            plan.state = PlanState.COMPLETED
+            self.emit("tool.failed", {
+                "plan_id": plan.plan_id,
+                "step_id": next_step.step_id,
+                "tool": next_step.tool,
+                "error": next_res.get("error")
+            })
+            if next_step.tool in self.NON_FATAL_FAILURE_TOOLS and idx < len(plan.steps) - 1:
+                partial_failures.append({
+                    "step_id": next_step.step_id,
+                    "tool": next_step.tool,
+                    "error": next_res.get("error", "Step failed")
+                })
+                continue
+
+            plan.state = PlanState.FAILED
+            break
+
+        if plan.state not in {PlanState.FAILED, PlanState.CANCELLED, PlanState.WAITING_FOR_PERMISSION}:
+            plan.state = PlanState.PARTIAL_SUCCESS if partial_failures else PlanState.COMPLETED
             plan.completed_at = time.time()
-            self.emit("task.completed", {"plan_id": plan.plan_id})
+            self.emit("task.completed", {
+                "plan_id": plan.plan_id,
+                "partial": bool(partial_failures),
+                "failures": partial_failures
+            })
             self.emit("maya.state.changed", {"state": "IDLE", "plan_id": plan.plan_id})
 
         return {
-            "success": plan.state == PlanState.COMPLETED,
+            "success": plan.state in {PlanState.COMPLETED, PlanState.PARTIAL_SUCCESS},
             "plan_id": plan.plan_id,
             "state": plan.state.value,
-            "steps": [asdict(s) for s in plan.steps]
+            "steps": [asdict(s) for s in plan.steps],
+            "partial_failures": partial_failures,
         }
 
     def execute_tool(self, tool_name: str, arguments: Dict[str, Any], token: Optional[str] = None, plan_id: str = "direct") -> Dict[str, Any]:
