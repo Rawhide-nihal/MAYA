@@ -97,7 +97,8 @@ class CommunicationAgent:
         target_tab_id = None
 
         if not current_chat and service_name in {"whatsapp", "telegram"}:
-            resolved_contact = self.bridge.resolve_contact(service_name, recipient)
+            resolver = getattr(self.bridge, "resolve_contact", None)
+            resolved_contact = resolver(service_name, recipient) if callable(resolver) else {}
             if resolved_contact.get("matched") and resolved_contact.get("name"):
                 recipient = str(resolved_contact["name"]).strip()
             elif resolved_contact.get("ambiguous"):
