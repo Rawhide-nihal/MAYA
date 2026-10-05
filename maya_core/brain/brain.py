@@ -56,7 +56,38 @@ class MayaBrain:
         # 1. Store user message in episodic memory
         self.memory.add_message("user", cleaned_query)
 
-        # 2. Retrieve dynamic context
+        # Fast conversation path: do not scan the project/system for ordinary chat.
+        intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
+        detected_tool = intent_info.get("tool")
+        intent = intent_info.get("intent", "CHAT")
+        if not detected_tool and intent in ["QUESTION", "SUGGESTION", "CHAT"]:
+            self.planner.emit("maya.state.changed", {"state": "THINKING"})
+            ctx = self.context_builder.build_chat_context(cleaned_query)
+            try:
+                raw_chat = self.runtime.generate(
+                    cleaned_query,
+                    system_prompt=ctx["prompt"],
+                    max_new_tokens=96,
+                    temperature=0.6,
+                    top_p=0.9,
+                ).strip()
+                reply = self._extract_conversation_text(raw_chat)
+            except Exception as e:
+                print(f"[MayaBrain] Fast chat generation error: {e}")
+                reply = "I hit a local model error while answering that."
+            self.memory.add_message("maya", reply)
+            self.planner.emit("maya.state.changed", {"state": "IDLE"})
+            return {
+                "intent": "CHAT",
+                "reply": reply,
+                "executed_tool": None,
+                "tasks": [],
+                "fallback_used": False,
+                "fast_path": True,
+                "timestamp": time.time(),
+            }
+
+        # 2. Full context is reserved for operational/tool requests.
         ctx = self.context_builder.build_context(cleaned_query)
 
         # 3. Neural Decision Step
@@ -72,8 +103,6 @@ class MayaBrain:
 
         # 4. Fallback if model did not return a valid structured decision for an action command
         fallback_used = False
-        intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
-        detected_tool = intent_info.get("tool")
 
         if not decision or not getattr(decision, "is_valid", True) or (decision.decision_type == "conversation" and detected_tool):
             fallback_used = True
@@ -189,6 +218,28 @@ class MayaBrain:
             "fallback_used": fallback_used,
             "timestamp": time.time()
         }
+
+    @staticmethod
+    def _extract_conversation_text(raw_output: str) -> str:
+        """Hide internal structured conversation JSON from the user when the model emits it."""
+        text = (raw_output or "").strip()
+        if not text:
+            return "I'm here. What do you want to work on?"
+        try:
+            candidate = text
+            if "```" in candidate:
+                start = candidate.find("{")
+                end = candidate.rfind("}")
+                if start >= 0 and end > start:
+                    candidate = candidate[start:end + 1]
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                message = parsed.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
+        except Exception:
+            pass
+        return text
 
     def _synthesize_natural_response(
         self,
