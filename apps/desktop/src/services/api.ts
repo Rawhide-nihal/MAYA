@@ -124,6 +124,25 @@ export const MayaApi = {
     return await res.json();
   },
 
+  async uploadAttachment(file: File): Promise<any> {
+    const form = new FormData();
+    form.append('file', file);
+
+    const res = await fetch(`${API_BASE}/attachments`, {
+      method: 'POST',
+      headers: {
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: form
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.success === false) {
+      throw new Error(data?.error || `Attachment upload failed with HTTP ${res.status}`);
+    }
+    return data;
+  },
+
   async sendChatMessage(message: string, permissionToken?: string): Promise<ChatResponse> {
     const res = await fetch(`${API_BASE}/chat`, {
       method: 'POST',
