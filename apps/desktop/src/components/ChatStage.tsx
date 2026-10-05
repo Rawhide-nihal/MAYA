@@ -493,7 +493,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
                         <span>Security Confirmation Required</span>
                       </div>
                       <p className="text-[11px] text-slate-300">
-                        This action modifies files, terminates processes, or runs privileged commands on your system.
+                        This action changes system or external state. Review the exact action above, then authorize it once if it is correct.
                       </p>
                       <div className="flex items-center space-x-2 pt-1">
                         <button
