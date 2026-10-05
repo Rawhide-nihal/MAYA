@@ -267,25 +267,103 @@ class MayaBrain:
                     "tasks": [],
                     "timestamp": time.time(),
                 }
-            window = ((capture.get("active_window") or {}).get("title") or "Desktop")
+
+            ui_context = {}
+            try:
+                ui_context = self.context_builder.windows.get_ui_context(max_controls=120)
+            except Exception:
+                ui_context = {}
+
+            window = (
+                ui_context.get("window_title")
+                or ((capture.get("active_window") or {}).get("title"))
+                or "Desktop"
+            )
             errors = capture.get("visible_errors") or []
-            if errors:
-                error_text = "; ".join(str(e.get("description", "")) for e in errors[:3])
-                reply = f"I'm looking at {window}, Boss. I detected: {error_text}"
-            else:
-                reply = f"I'm looking at {window}, Boss. I don't see an error signal in the visible window titles."
+            controls = ui_context.get("controls") or []
 
-            if "read this page" in lower or "where should i click" in lower:
-                reply += (
-                    " The capture is in session context, but this local build does not yet have a general "
-                    "visual-language/OCR model, so I won't invent page text or click targets I cannot actually read."
+            # Keep only real accessibility data exposed by the foreground app.
+            visible_controls = [
+                c for c in controls
+                if c.get("visible", True) and (c.get("name") or c.get("control_type"))
+            ][:120]
+            error_controls = [
+                c for c in visible_controls
+                if any(term in str(c.get("name", "")).lower() for term in [
+                    "error", "exception", "failed", "failure", "fatal",
+                    "warning", "traceback", "not responding"
+                ])
+            ]
+
+            factual_payload = {
+                "window_title": window,
+                "window_title_errors": errors[:5],
+                "accessibility_available": bool(ui_context.get("success")),
+                "controls": visible_controls,
+                "error_related_controls": error_controls[:20],
+            }
+
+            if ui_context.get("success") and visible_controls:
+                policy = self.personality.policy(cleaned, {"visible_errors": errors})
+                analysis_prompt = (
+                    "The user asked: " + cleaned + "\n"
+                    "You are given ONLY real Windows accessibility/UI Automation data from the foreground app. "
+                    "Use only controls actually present below. Do not invent page text, buttons, errors, or click targets. "
+                    "If asked where to click, name the exact visible control and, when available, its bounds. "
+                    "If asked to read/summarize, summarize the exposed accessible text. "
+                    "If the accessibility data is insufficient, say so clearly.\n"
+                    "UI DATA:\n" + json.dumps(factual_payload, default=str)[:16000]
                 )
+                try:
+                    reply = self.runtime.generate(
+                        analysis_prompt,
+                        system_prompt=(
+                            "You are MAYA performing grounded screen/UI analysis. "
+                            + self.personality.prompt_fragment(cleaned, {"visible_errors": errors})
+                        ),
+                        max_new_tokens=min(policy.max_new_tokens, 320),
+                        temperature=0.25,
+                        top_p=0.9,
+                    ).strip()
+                    reply = self._extract_conversation_text(reply)
+                except Exception as exc:
+                    print(f"[MayaBrain] UI analysis generation error: {exc}")
+                    reply = ""
 
+                if not reply:
+                    if error_controls:
+                        names = ", ".join(str(c.get("name")) for c in error_controls[:5] if c.get("name"))
+                        reply = f"I'm looking at {window}, Boss. The accessibility tree exposes error-related UI: {names}."
+                    else:
+                        reply = (
+                            f"I'm looking at {window}, Boss. I can read {len(visible_controls)} accessible UI controls, "
+                            "but I couldn't synthesize a reliable interpretation."
+                        )
+            else:
+                if errors:
+                    error_text = "; ".join(str(e.get("description", "")) for e in errors[:3])
+                    reply = f"I'm looking at {window}, Boss. I detected: {error_text}"
+                else:
+                    reply = (
+                        f"I'm looking at {window}, Boss. The screenshot is captured, but this surface is not exposing "
+                        "usable accessibility text/controls, so I won't guess what the pixels say."
+                    )
+
+            details = {
+                "capture": capture,
+                "ui_context": ui_context,
+                "grounding": "Windows UI Automation + captured screen metadata"
+            }
+            self.unified_context.remember_entity(
+                "screen_analysis",
+                details,
+                label="latest screen analysis"
+            )
             return {
                 "intent": "VISION_ANALYSIS",
                 "reply": reply,
-                "executed_tool": "capture_screen",
-                "details": capture,
+                "executed_tool": "analyze_screen",
+                "details": details,
                 "tasks": [],
                 "verified": True,
                 "timestamp": time.time(),
