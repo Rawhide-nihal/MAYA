@@ -127,6 +127,53 @@ class DeterministicIntentClassifier:
                 "summary": "Undo last reversible action"
             }
 
+        # Context-linked file/screenshot communication.
+        attachment_chat = re.match(
+            r"^(?:send|share)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
+            r"\s+to\s+(.+?)\s+(?:on|via)\s+(whatsapp|telegram)"
+            r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if attachment_chat:
+            attachment_ref, recipient, service, optional_message = attachment_chat.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": recipient.strip(),
+                    "message": (optional_message or "").strip(),
+                    "profile": "main",
+                    "attachment_path": attachment_ref.strip()
+                },
+                "confidence": 0.99,
+                "summary": f"Send {attachment_ref.strip()} to {recipient.strip()} on {service}"
+            }
+
+        attachment_email = re.match(
+            r"^(?:email|send)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
+            r"\s+to\s+([^\s,]+@[^\s,]+)"
+            r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if attachment_email:
+            attachment_ref, recipient, optional_message = attachment_email.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": "gmail",
+                    "recipient": recipient.strip(),
+                    "message": (optional_message or "").strip(),
+                    "profile": "main",
+                    "attachment_path": attachment_ref.strip()
+                },
+                "confidence": 0.99,
+                "summary": f"Email {attachment_ref.strip()} to {recipient.strip()}"
+            }
+
         # Authenticated communication fallback.
         # Conservative parsing keeps ambiguous recipients from being sent accidentally.
         email_subject = re.match(
