@@ -233,6 +233,34 @@ class UnifiedContextEngine:
             return self.screenshots[-2] if len(self.screenshots) > 1 else None
 
         ref_lower = ref.lower().strip()
+
+        # Time-relative references such as "screenshot from five minutes ago".
+        number_words = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            "fifteen": 15, "twenty": 20, "thirty": 30,
+        }
+        time_match = re.search(
+            r"(?:(\d+)|(" + "|".join(number_words.keys()) + r"))\s+"
+            r"(second|seconds|minute|minutes|hour|hours)\s+ago",
+            ref_lower
+        )
+        if time_match:
+            amount = int(time_match.group(1)) if time_match.group(1) else number_words[time_match.group(2)]
+            unit = time_match.group(3)
+            multiplier = 1
+            if unit.startswith("minute"):
+                multiplier = 60
+            elif unit.startswith("hour"):
+                multiplier = 3600
+            target = time.time() - (amount * multiplier)
+            candidates = list(self.screenshots)
+            if candidates:
+                nearest = min(candidates, key=lambda item: abs(float(item.get("timestamp", 0)) - target))
+                tolerance = max(90, amount * multiplier * 0.75)
+                if abs(float(nearest.get("timestamp", 0)) - target) <= tolerance:
+                    return nearest
+
         if ref_lower in self.named_refs:
             entity = self.named_refs[ref_lower]
             value = entity.get("value")
