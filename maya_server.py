@@ -440,6 +440,11 @@ def upload_attachment():
     if not analysis.get("success"):
         return jsonify(analysis), 400
 
+    # Keep the internal collision-safe path, but expose the original user-facing
+    # filename in conversation/context.
+    analysis["stored_name"] = target.name
+    analysis["name"] = filename
+
     record = unified_context.register_attachment(analysis, label=filename)
     dispatch_event("context.attachment.added", {
         "id": record.get("id"),
