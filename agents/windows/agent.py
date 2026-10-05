@@ -512,6 +512,101 @@ class WindowsAgent:
             return []
         return []
 
+    def get_ui_context(self, max_controls: int = 100) -> Dict[str, Any]:
+        """Inspect the foreground app's Windows UI Automation/accessibility tree."""
+        if sys.platform != "win32":
+            return {
+                "success": False,
+                "accessible": False,
+                "error": "Windows UI Automation is only available on Windows."
+            }
+
+        try:
+            from pywinauto import Desktop
+        except Exception as exc:
+            return {
+                "success": False,
+                "accessible": False,
+                "error": f"pywinauto/UI Automation unavailable: {exc}"
+            }
+
+        if not HAS_WIN32:
+            return {
+                "success": False,
+                "accessible": False,
+                "error": "Foreground-window APIs are unavailable."
+            }
+
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            title = win32gui.GetWindowText(hwnd)
+            if not hwnd:
+                return {
+                    "success": False,
+                    "accessible": False,
+                    "error": "No foreground window is available."
+                }
+
+            window = Desktop(backend="uia").window(handle=hwnd)
+            descendants = window.descendants()
+            controls = []
+            seen = set()
+
+            for control in descendants:
+                if len(controls) >= max(1, int(max_controls)):
+                    break
+                try:
+                    info = control.element_info
+                    name = str(getattr(info, "name", "") or "").strip()
+                    control_type = str(getattr(info, "control_type", "") or "").strip()
+                    automation_id = str(getattr(info, "automation_id", "") or "").strip()
+                    class_name = str(getattr(info, "class_name", "") or "").strip()
+                    rect = getattr(info, "rectangle", None)
+                    bounds = None
+                    if rect is not None:
+                        bounds = {
+                            "left": int(rect.left),
+                            "top": int(rect.top),
+                            "right": int(rect.right),
+                            "bottom": int(rect.bottom),
+                        }
+
+                    if not name and control_type not in {"Button", "Edit", "ComboBox", "CheckBox", "RadioButton", "Hyperlink", "MenuItem"}:
+                        continue
+
+                    key = (name, control_type, automation_id, str(bounds))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    controls.append({
+                        "name": name,
+                        "control_type": control_type,
+                        "automation_id": automation_id,
+                        "class_name": class_name,
+                        "bounds": bounds,
+                        "enabled": bool(control.is_enabled()),
+                        "visible": bool(control.is_visible()),
+                    })
+                except Exception:
+                    continue
+
+            return {
+                "success": True,
+                "accessible": True,
+                "window_title": title,
+                "hwnd": hwnd,
+                "control_count": len(controls),
+                "controls": controls,
+                "truncated": len(descendants) > len(controls),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "accessible": False,
+                "error": f"Foreground UI Automation inspection failed: {exc}"
+            }
+
     def list_windows(self) -> List[Dict[str, Any]]:
         """Lists all open windows with title, process name, PID, and geometry."""
         windows = []
