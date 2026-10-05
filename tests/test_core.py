@@ -826,6 +826,16 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(snapshot["selected_files"][0], "C:/tmp/selected.txt")
         self.assertEqual(snapshot["clipboard"], "clipboard text")
 
+        context.last_snapshot = {
+            "active_process": "explorer.exe",
+            "active_window_title": "File Explorer",
+            "selected_files": ["C:/tmp/selected.txt"],
+        }
+        selected_ref = context.resolve_reference("this file")
+        self.assertEqual(selected_ref["kind"], "file")
+        self.assertEqual(selected_ref["value"], "C:/tmp/selected.txt")
+        self.assertEqual(selected_ref["resolution"], "active_explorer_selection")
+
     def test_v5_compound_command_fallback(self):
         decision = self.brain._compound_fallback_decision(
             "Take a screenshot, then check my project for errors"
