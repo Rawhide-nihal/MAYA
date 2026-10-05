@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from agents.communication.bridge import CommunicationBridge, communication_bridge
 from agents.windows.agent import WindowsAgent
+from maya_core.config import settings
 
 
 SERVICE_URLS = {
@@ -69,24 +70,26 @@ class CommunicationAgent:
         if not message and not attachment_path:
             return {"success": False, "verified": False, "error": "Message or attachment is required."}
 
+        expanded_attachment = None
         if attachment_path:
-            expanded = os.path.abspath(os.path.expanduser(attachment_path))
-            if not os.path.exists(expanded):
+            expanded_attachment = os.path.abspath(os.path.expanduser(attachment_path))
+            if not os.path.isfile(expanded_attachment):
                 return {
                     "success": False,
                     "verified": False,
-                    "error": f"Attachment does not exist: {expanded}",
+                    "error": f"Attachment does not exist or is not a file: {expanded_attachment}",
                 }
-            # Browser-file handoff is deliberately not faked. The extension will
-            # gain attachment transport in the next capability pass.
-            return {
-                "success": False,
-                "verified": False,
-                "error": (
-                    "Text messaging is ready, but local attachment transfer is not enabled yet. "
-                    "MAYA will not claim an attachment was sent when it was not."
-                ),
-            }
+            max_mb = int(settings.get("communication_attachment_max_mb", 12))
+            size_bytes = os.path.getsize(expanded_attachment)
+            if size_bytes > max_mb * 1024 * 1024:
+                return {
+                    "success": False,
+                    "verified": False,
+                    "error": (
+                        f"Attachment is {round(size_bytes / (1024 * 1024), 1)} MB. "
+                        f"The current verified browser bridge limit is {max_mb} MB."
+                    ),
+                }
 
         launch = self.windows.launch_application(
             "Google Chrome",
@@ -108,6 +111,7 @@ class CommunicationAgent:
             "message": message,
             "subject": (subject or "").strip(),
             "profile": profile or "main",
+            "attachment_path": expanded_attachment,
         }
         result = self.bridge.submit(command, timeout=30.0)
         result.setdefault("service", service_name)
