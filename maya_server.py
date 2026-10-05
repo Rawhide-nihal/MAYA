@@ -15,6 +15,7 @@ import base64
 from urllib.parse import urlparse
 from pathlib import Path
 from flask import Flask, request, jsonify, Response, stream_with_context
+from werkzeug.utils import secure_filename
 
 # Add repository root to Python path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -35,6 +36,9 @@ from agents.browser.agent import BrowserAgent
 from agents.communication.agent import CommunicationAgent
 from agents.communication.bridge import communication_bridge
 from maya_core.context.builder import ContextBuilder
+from maya_core.context.engine import UnifiedContextEngine
+from maya_core.personality.engine import PersonalityEngine
+from maya_core.attachments.intelligence import AttachmentIntelligence
 from maya_core.planner.dynamic_planner import DynamicTaskPlanner
 from maya_core.brain.brain import MayaBrain
 from skills.registry import SkillsRegistry
@@ -75,6 +79,9 @@ diagnostics = DiagnosticEngine(terminal)
 vision = VisionAgent()
 browser = BrowserAgent()
 communication = CommunicationAgent(windows=windows, bridge=communication_bridge)
+personality = PersonalityEngine()
+unified_context = UnifiedContextEngine(windows=windows, vision=vision, memory=memory, ledger=ledger)
+attachment_intelligence = AttachmentIntelligence()
 
 planner = DynamicTaskPlanner(
     permissions, ledger, memory, windows, terminal, filesystem,
@@ -82,8 +89,17 @@ planner = DynamicTaskPlanner(
 )
 
 voice = VoiceEngine(event_emitter=dispatch_event)
-context_builder = ContextBuilder(memory, ledger, windows, developer)
-brain = MayaBrain(context_builder, planner, memory, permissions, ledger, runtime=model_runtime)
+context_builder = ContextBuilder(
+    memory, ledger, windows, developer,
+    unified_context=unified_context,
+    personality=personality
+)
+brain = MayaBrain(
+    context_builder, planner, memory, permissions, ledger,
+    runtime=model_runtime,
+    unified_context=unified_context,
+    personality=personality
+)
 skills = SkillsRegistry()
 
 # Security & Origin Validation
@@ -173,7 +189,9 @@ def get_status():
         "offline_only": settings.get("offline_only", True),
         "metrics": summary,
         "model": model_info,
-        "active_project": str(developer.active_project_path)
+        "active_project": str(developer.active_project_path),
+        "maya_mode": personality.current_mode().value,
+        "context_session_id": unified_context.session_id
     })
 
 # 3. Chat Pipeline
@@ -351,6 +369,63 @@ def communication_status():
     if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
         return jsonify({"error": "Unauthorized"}), 401
     return jsonify(communication_bridge.status())
+
+
+# Unified Context / Attachments
+@app.route("/api/context", methods=["GET"])
+def get_unified_context():
+    return jsonify(unified_context.session_summary())
+
+
+@app.route("/api/attachments", methods=["POST"])
+def upload_attachment():
+    max_mb = int(settings.get("attachment_max_mb", 75))
+    if request.content_length and request.content_length > max_mb * 1024 * 1024:
+        return jsonify({
+            "success": False,
+            "error": f"Attachment exceeds the configured {max_mb} MB limit."
+        }), 413
+
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False, "error": "No attachment file provided."}), 400
+
+    filename = secure_filename(upload.filename)
+    if not filename:
+        return jsonify({"success": False, "error": "Attachment filename is invalid."}), 400
+
+    attachment_dir = unified_context.session_dir / "attachments"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    target = attachment_dir / f"{int(time.time() * 1000)}_{filename}"
+    upload.save(str(target))
+
+    if target.stat().st_size > max_mb * 1024 * 1024:
+        try:
+            target.unlink()
+        except Exception:
+            pass
+        return jsonify({
+            "success": False,
+            "error": f"Attachment exceeds the configured {max_mb} MB limit."
+        }), 413
+
+    analysis = attachment_intelligence.analyze(str(target))
+    if not analysis.get("success"):
+        return jsonify(analysis), 400
+
+    record = unified_context.register_attachment(analysis, label=filename)
+    dispatch_event("context.attachment.added", {
+        "id": record.get("id"),
+        "name": record.get("name"),
+        "type": record.get("type"),
+        "summary": record.get("summary")
+    })
+
+    response = dict(record)
+    context_text = str(response.get("context_text") or "")
+    if len(context_text) > 6000:
+        response["context_text"] = context_text[:6000] + "\n...[preview truncated]"
+    return jsonify(response)
 
 
 # 9. Action Ledger Activity
