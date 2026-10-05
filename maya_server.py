@@ -14,7 +14,7 @@ import hmac
 import base64
 from urllib.parse import urlparse
 from pathlib import Path
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_file
 from werkzeug.utils import secure_filename
 
 # Add repository root to Python path
@@ -358,6 +358,25 @@ def communication_next():
     service = request.args.get("service", "").strip().lower()
     command = communication_bridge.next_command(service)
     return jsonify({"command": command})
+
+
+@app.route("/api/communication/attachment/<command_id>", methods=["GET"])
+def communication_attachment(command_id: str):
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    attachment = communication_bridge.get_attachment(command_id)
+    if not attachment:
+        return jsonify({"error": "No attachment is available for this active command."}), 404
+
+    return send_file(
+        attachment["path"],
+        mimetype=attachment["mime_type"],
+        as_attachment=True,
+        download_name=attachment["name"],
+        conditional=True,
+    )
 
 
 @app.route("/api/communication/result", methods=["POST"])
