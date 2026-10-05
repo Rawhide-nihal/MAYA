@@ -91,6 +91,24 @@ chrome.windows.onFocusChanged.addListener(() => {
   reportActiveTabContext();
 });
 
+async function postContacts(service, contacts, source = 'browser') {
+  try {
+    if (!service || !Array.isArray(contacts) || contacts.length === 0) return;
+    const token = await getToken();
+    const response = await fetch(`${MAYA_API}/communication/contacts`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Maya-Token': token
+      },
+      body: JSON.stringify({ service, contacts, source })
+    });
+    if (response.status === 401) sessionToken = null;
+  } catch {
+    // Contact discovery is opportunistic; MAYA may be offline.
+  }
+}
+
 async function fetchCommandAttachment(commandId) {
   const token = await getToken();
   const response = await fetch(
@@ -153,6 +171,11 @@ async function postResult(commandId, result) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'maya-poll' && sender.tab?.id) {
     pollForCommand(message.service, sender.tab.id);
+    return;
+  }
+
+  if (message?.type === 'maya-contact-sync' && message.service && Array.isArray(message.contacts)) {
+    postContacts(message.service, message.contacts, message.source || 'browser');
     return;
   }
 
