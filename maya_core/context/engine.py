@@ -280,9 +280,16 @@ class UnifiedContextEngine:
     def _find_screenshot(self, ref: Optional[str]) -> Optional[Dict[str, Any]]:
         if not self.screenshots:
             return None
-        if not ref or ref.lower() in {"latest", "this", "that", "current", "latest screenshot"}:
+        normalized_ref = (ref or "").lower().strip()
+        if not ref or normalized_ref in {
+            "latest", "this", "that", "current",
+            "latest screenshot", "this screenshot", "that screenshot",
+            "the screenshot", "current screenshot"
+        }:
             return self.screenshots[-1]
-        if ref.lower() in {"previous", "before", "previous screenshot"}:
+        if normalized_ref in {
+            "previous", "before", "previous screenshot", "the previous screenshot"
+        }:
             return self.screenshots[-2] if len(self.screenshots) > 1 else None
 
         ref_lower = ref.lower().strip()
