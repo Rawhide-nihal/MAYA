@@ -274,6 +274,7 @@ class AttachmentIntelligence:
     def _zip(self, path: Path) -> Dict[str, Any]:
         with zipfile.ZipFile(path, "r") as archive:
             entries = [i for i in archive.infolist() if not i.is_dir()]
+            original_entry_count = len(entries)
             if len(entries) > self.max_zip_entries:
                 entries = entries[: self.max_zip_entries]
                 truncated = True
@@ -285,6 +286,7 @@ class AttachmentIntelligence:
             markers = []
             source_entries = []
             config_entries = []
+            source_relationships: Dict[str, List[str]] = {}
 
             for name in names:
                 p = Path(name)
@@ -295,49 +297,190 @@ class AttachmentIntelligence:
                     source_entries.append(name)
                 if p.name.lower() in PROJECT_MARKERS:
                     markers.append(name)
-                if p.name.lower() in {"package.json", "requirements.txt", "pyproject.toml", "pom.xml", "cargo.toml", "go.mod"}:
+                if p.name.lower() in {
+                    "package.json", "requirements.txt", "pyproject.toml", "pom.xml",
+                    "cargo.toml", "go.mod", "composer.json", "build.gradle", "build.gradle.kts"
+                }:
                     config_entries.append(name)
 
+            dependencies: Dict[str, List[str]] = {}
+            config_summaries: Dict[str, Any] = {}
             excerpts = []
+            total_excerpt_chars = 0
+
             for info in entries:
                 name = info.filename.replace("\\", "/")
-                ext = Path(name).suffix.lower()
-                if ext not in TEXT_EXTENSIONS and Path(name).name.lower() not in PROJECT_MARKERS:
-                    continue
+                p = Path(name)
+                ext = p.suffix.lower()
+                lower_name = p.name.lower()
+
                 if info.file_size > 1_000_000:
                     continue
+
+                is_text = ext in TEXT_EXTENSIONS or lower_name in PROJECT_MARKERS
+                if not is_text:
+                    continue
+
                 try:
                     text = archive.read(info).decode("utf-8", errors="replace")
                 except Exception:
                     continue
-                excerpts.append(f"\n--- FILE {name} ---\n{text[:5000]}")
-                if sum(len(x) for x in excerpts) >= self.max_text_chars:
-                    break
+
+                # Parse dependency/config files into structured project metadata.
+                try:
+                    if lower_name == "package.json":
+                        data = json.loads(text)
+                        deps = []
+                        for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                            section = data.get(key, {})
+                            if isinstance(section, dict):
+                                deps.extend(f"{pkg}@{version}" for pkg, version in section.items())
+                        dependencies[name] = sorted(set(deps))
+                        config_summaries[name] = {
+                            "name": data.get("name"),
+                            "version": data.get("version"),
+                            "scripts": data.get("scripts", {}),
+                        }
+                    elif lower_name == "requirements.txt":
+                        deps = [
+                            line.strip() for line in text.splitlines()
+                            if line.strip() and not line.lstrip().startswith("#")
+                        ]
+                        dependencies[name] = deps[:300]
+                    elif lower_name in {"pyproject.toml", "cargo.toml"}:
+                        try:
+                            import tomllib
+                            data = tomllib.loads(text)
+                            if lower_name == "pyproject.toml":
+                                project = data.get("project", {}) if isinstance(data, dict) else {}
+                                deps = list(project.get("dependencies", []) or [])
+                                optional = project.get("optional-dependencies", {}) or {}
+                                if isinstance(optional, dict):
+                                    for group, values in optional.items():
+                                        deps.extend(f"[{group}] {value}" for value in (values or []))
+                                dependencies[name] = [str(x) for x in deps][:300]
+                                config_summaries[name] = {
+                                    "project_name": project.get("name"),
+                                    "requires_python": project.get("requires-python"),
+                                }
+                            else:
+                                deps_section = data.get("dependencies", {}) if isinstance(data, dict) else {}
+                                if isinstance(deps_section, dict):
+                                    dependencies[name] = [
+                                        f"{pkg}={value}" for pkg, value in deps_section.items()
+                                    ][:300]
+                        except Exception:
+                            pass
+                    elif lower_name == "go.mod":
+                        deps = []
+                        in_block = False
+                        for raw in text.splitlines():
+                            line = raw.strip()
+                            if line.startswith("require ("):
+                                in_block = True
+                                continue
+                            if in_block and line == ")":
+                                in_block = False
+                                continue
+                            if line.startswith("require "):
+                                deps.append(line[len("require "):].strip())
+                            elif in_block and line and not line.startswith("//"):
+                                deps.append(line)
+                        dependencies[name] = deps[:300]
+                    elif lower_name == "pom.xml":
+                        import xml.etree.ElementTree as ET
+                        root = ET.fromstring(text)
+                        deps = []
+                        for dep in root.findall(".//{*}dependency"):
+                            group = dep.findtext("{*}groupId") or ""
+                            artifact = dep.findtext("{*}artifactId") or ""
+                            version = dep.findtext("{*}version") or ""
+                            if artifact:
+                                value = f"{group}:{artifact}" if group else artifact
+                                if version:
+                                    value += f":{version}"
+                                deps.append(value)
+                        dependencies[name] = deps[:300]
+                    elif lower_name == "composer.json":
+                        data = json.loads(text)
+                        deps = []
+                        for key in ("require", "require-dev"):
+                            section = data.get(key, {})
+                            if isinstance(section, dict):
+                                deps.extend(f"{pkg}@{version}" for pkg, version in section.items())
+                        dependencies[name] = sorted(set(deps))
+                    elif lower_name in {"build.gradle", "build.gradle.kts"}:
+                        deps = re.findall(
+                            r"(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?[\"']([^\"']+)",
+                            text
+                        )
+                        dependencies[name] = deps[:300]
+                except Exception:
+                    # Config parsing must never make archive analysis fail.
+                    pass
+
+                # Lightweight source relationship extraction: imports/requires only.
+                if ext == ".py":
+                    refs = re.findall(
+                        r"^\s*(?:from\s+([a-zA-Z0-9_\.]+)\s+import|import\s+([a-zA-Z0-9_\.]+))",
+                        text,
+                        flags=re.MULTILINE
+                    )
+                    flat = [a or b for a, b in refs if a or b]
+                    if flat:
+                        source_relationships[name] = sorted(set(flat))[:80]
+                elif ext in {".js", ".jsx", ".ts", ".tsx"}:
+                    refs = re.findall(
+                        r"(?:from\s+[\"']([^\"']+)[\"']|require\(\s*[\"']([^\"']+)[\"']\s*\))",
+                        text
+                    )
+                    flat = [a or b for a, b in refs if a or b]
+                    if flat:
+                        source_relationships[name] = sorted(set(flat))[:80]
+                elif ext == ".java":
+                    refs = re.findall(r"^\s*import\s+([a-zA-Z0-9_\.]+);", text, flags=re.MULTILINE)
+                    if refs:
+                        source_relationships[name] = sorted(set(refs))[:80]
+
+                if total_excerpt_chars < self.max_text_chars:
+                    chunk = f"\n--- FILE {name} ---\n{text[:5000]}"
+                    excerpts.append(chunk)
+                    total_excerpt_chars += len(chunk)
 
         top_dirs = sorted({name.split("/", 1)[0] for name in names if "/" in name})[:60]
         language_list = sorted(languages.items(), key=lambda kv: kv[1], reverse=True)
         warnings = []
         if truncated:
-            warnings.append(f"ZIP contained more than {self.max_zip_entries} files; file listing was bounded.")
+            warnings.append(
+                f"ZIP contained {original_entry_count} files; analysis was bounded to the first {self.max_zip_entries} entries."
+            )
 
+        dependency_count = sum(len(v) for v in dependencies.values())
         return {
             "capabilities": [
                 "archive_structure", "project_structure", "dependency_config_detection",
-                "source_language_detection", "bounded_source_extraction"
+                "dependency_extraction", "source_language_detection",
+                "source_relationship_detection", "bounded_source_extraction"
             ],
-            "entry_count": len(names),
+            "entry_count": original_entry_count,
+            "analyzed_entry_count": len(names),
             "entries": names[:1000],
             "top_level_directories": top_dirs,
             "project_markers": markers,
             "config_files": config_entries,
+            "config_summaries": config_summaries,
+            "dependencies": dependencies,
+            "dependency_count": dependency_count,
+            "source_relationships": source_relationships,
             "languages": [{"language": lang, "files": count} for lang, count in language_list],
             "source_file_count": len(source_entries),
             "extracted_text": self._bounded("".join(excerpts)),
             "warnings": warnings,
             "summary": (
-                f"ZIP/project archive with {len(names)} file(s), "
+                f"ZIP/project archive with {original_entry_count} file(s), "
                 f"{len(source_entries)} recognized source file(s), "
-                f"and {len(markers)} project/dependency marker(s)."
+                f"{len(markers)} project/dependency marker(s), and "
+                f"{dependency_count} dependency declaration(s)."
             ),
         }
 
@@ -361,6 +504,20 @@ class AttachmentIntelligence:
                     f"{item['language']} ({item['files']})" for item in result["languages"][:12]
                 )
             )
+
+        dependencies = result.get("dependencies") or {}
+        if dependencies:
+            dep_lines = []
+            for config_name, values in list(dependencies.items())[:12]:
+                dep_lines.append(f"{config_name}: " + ", ".join(str(v) for v in values[:40]))
+            parts.append("Dependencies:\n" + "\n".join(dep_lines))
+
+        relationships = result.get("source_relationships") or {}
+        if relationships:
+            rel_lines = []
+            for source_name, refs in list(relationships.items())[:40]:
+                rel_lines.append(f"{source_name} -> " + ", ".join(str(v) for v in refs[:30]))
+            parts.append("Source relationships:\n" + "\n".join(rel_lines))
 
         extracted = result.get("extracted_text") or ""
         if extracted:
