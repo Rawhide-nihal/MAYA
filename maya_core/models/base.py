@@ -363,11 +363,14 @@ class DeterministicIntentClassifier:
                     elif any(
                         phrase in lower
                         for phrase in [
-                            "main account", "main profile",
+                            "main account", "main profile", "my main account",
                             "primary account", "primary profile",
-                            "default account", "my main account"
+                            "default", "default account", "default profile",
+                            "my default", "my default account", "my default profile"
                         ]
                     ):
+                        # All user-facing default/main aliases map to the locally
+                        # selected MAYA Chrome profile.
                         profile_hint = "main"
 
                 # Check if user also asked to check project or scan errors
