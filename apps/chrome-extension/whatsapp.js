@@ -26,6 +26,26 @@
       }) || null;
   }
 
+  function findAttachButton() {
+    return M.findByAriaContains('attach', '[aria-label]') ||
+      Array.from(document.querySelectorAll('button, [role="button"]'))
+        .filter(M.visible)
+        .find(el => M.normalize(el.getAttribute('title')).includes('attach')) ||
+      null;
+  }
+
+  function findFileInput(mime = '') {
+    const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+    if (!inputs.length) return null;
+    if (String(mime).startsWith('image/')) {
+      return inputs.find(input => M.normalize(input.getAttribute('accept')).includes('image')) || inputs[0];
+    }
+    return inputs.find(input => {
+      const accept = M.normalize(input.getAttribute('accept'));
+      return !accept || accept.includes('*') || !accept.includes('image');
+    }) || inputs[0];
+  }
+
   function findSendButton() {
     return M.findByAriaContains('send', 'button[aria-label], [role="button"][aria-label]') ||
       document.querySelector('button span[data-icon="send"]')?.closest('button') ||
@@ -72,12 +92,47 @@
       return { success: false, verified: false, error: selected.error };
     }
 
-    const composer = await M.waitFor(findComposer, 7000);
-    if (!composer) {
-      return { success: false, verified: false, error: 'WhatsApp message composer was not found.' };
-    }
+    let attachmentVerified = false;
 
-    M.setEditableText(composer, message);
+    if (command.has_attachment) {
+      const attachment = await M.fetchAttachment(command);
+      let fileInput = findFileInput(attachment.mime);
+
+      if (!fileInput) {
+        const attachButton = await M.waitFor(findAttachButton, 4000);
+        if (attachButton) attachButton.click();
+        fileInput = await M.waitFor(() => findFileInput(attachment.mime), 5000);
+      }
+
+      if (!fileInput || !M.setFileInput(fileInput, attachment)) {
+        return {
+          success: false,
+          verified: false,
+          error: 'WhatsApp attachment input was not available or rejected the selected file.'
+        };
+      }
+
+      const previewSend = await M.waitFor(findSendButton, 10000);
+      if (!previewSend) {
+        return {
+          success: false,
+          verified: false,
+          error: 'WhatsApp did not expose an attachment preview/send state. MAYA refused to send.'
+        };
+      }
+      attachmentVerified = true;
+
+      if (message) {
+        const caption = await M.waitFor(findComposer, 4000);
+        if (caption) M.setEditableText(caption, message);
+      }
+    } else {
+      const composer = await M.waitFor(findComposer, 7000);
+      if (!composer) {
+        return { success: false, verified: false, error: 'WhatsApp message composer was not found.' };
+      }
+      if (message) M.setEditableText(composer, message);
+    }
 
     if (command.action === 'compose') {
       return {
@@ -86,7 +141,8 @@
         prepared: true,
         sent: false,
         service: 'whatsapp',
-        recipient
+        recipient,
+        attachment_verified: attachmentVerified
       };
     }
 
@@ -107,6 +163,7 @@
       sent: Boolean(emptied),
       service: 'whatsapp',
       recipient,
+      attachment_verified: attachmentVerified,
       send_attempted: true,
       error: emptied ? undefined : 'MAYA clicked Send, but WhatsApp did not expose a verified sent state. Check the conversation before retrying to avoid duplicates.'
     };
