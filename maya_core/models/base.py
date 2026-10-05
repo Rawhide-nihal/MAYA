@@ -356,6 +356,42 @@ class DeterministicIntentClassifier:
                 "summary": f"Open {service.title()} in the main Chrome profile"
             }
 
+        # Local file actions: exact session references and recent user files.
+        copy_recent_file = re.match(
+            r"^(?:copy|put)\s+"
+            r"((?:the\s+)?(?:(?:latest|recent|most\s+recent|newest|last)\s+)?"
+            r"(?:screenshot|screen\s+shot|png|jpe?g|image|picture|photo|file|document)|"
+            r"(?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
+            r"\s+(?:to|on|into)\s+(?:my\s+|the\s+)?clipboard$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if copy_recent_file:
+            return {
+                "intent": "PC_ACTION",
+                "tool": "copy_file_to_clipboard",
+                "arguments": {"filepath": copy_recent_file.group(1).strip()},
+                "confidence": 0.99,
+                "summary": f"Copy {copy_recent_file.group(1).strip()} to Windows clipboard"
+            }
+
+        open_recent_file = re.match(
+            r"^(?:open|show|view)\s+"
+            r"((?:the\s+)?(?:(?:latest|recent|most\s+recent|newest|last)\s+)"
+            r"(?:screenshot|screen\s+shot|png|jpe?g|image|picture|photo|file|document)|"
+            r"(?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if open_recent_file:
+            return {
+                "intent": "PC_ACTION",
+                "tool": "open_file",
+                "arguments": {"filepath": open_recent_file.group(1).strip()},
+                "confidence": 0.99,
+                "summary": f"Open {open_recent_file.group(1).strip()}"
+            }
+
         # Check for open application (VS Code, Notepad, Chrome, Explorer, Terminal, etc.)
         match_app = re.search(r"\b(?:open|launch|start|run)\s+(?:application\s+|app\s+)?([a-zA-Z0-9\s\.\-_]+?)(?:\s+and\s+|\s*$|\.|\?)", lower)
         if match_app:
