@@ -29,7 +29,11 @@ class ContextBuilder:
     def build_chat_context(self, user_query: str) -> Dict[str, Any]:
         """Builds lightweight context for ordinary conversation without scanning the PC."""
         relevant_mems = self.memory.search_relevant_memories(user_query, top_k=2)
-        history = self.memory.get_conversation_history(limit=6)
+        history = self.memory.get_conversation_history(limit=7)
+        # process_request stores the current user message before building context;
+        # exclude that same message so it is not sent to the model twice.
+        if history and history[-1].get("role") == "user" and history[-1].get("message", "").strip() == user_query.strip():
+            history = history[:-1]
         formatted_history = [
             f"{h['role'].upper()}: {h['message']}"
             for h in history[-4:]
@@ -72,9 +76,11 @@ class ContextBuilder:
         relevant_mems = self.memory.search_relevant_memories(user_query, top_k=3)
 
         # 5. Recent conversation turns
-        history = self.memory.get_conversation_history(limit=6)
+        history = self.memory.get_conversation_history(limit=7)
+        if history and history[-1].get("role") == "user" and history[-1].get("message", "").strip() == user_query.strip():
+            history = history[:-1]
         formatted_history = []
-        for h in history:
+        for h in history[-6:]:
             formatted_history.append(f"{h['role'].upper()}: {h['message']}")
 
         # 6. Working memory context
