@@ -13,7 +13,7 @@ from maya_core.models.base import DeterministicIntentClassifier
 from maya_core.models.runtime import MayaModelRuntime, model_runtime
 from maya_core.context.builder import ContextBuilder
 from maya_core.planner.dynamic_planner import DynamicTaskPlanner, DynamicTaskPlan, PlanState
-from maya_core.brain.decision import parse_and_validate_decision, NeuralDecision
+from maya_core.brain.decision import parse_and_validate_decision, NeuralDecision, NeuralPlanStep
 from maya_core.tools.registry import default_tool_registry
 from memory.store import MemoryStore
 from security.permissions.tier import PermissionManager
@@ -43,6 +43,93 @@ class MayaBrain:
         self.personality = personality or PersonalityEngine()
         # Deterministic classifier reserved as emergency safety fallback
         self.fallback_classifier = DeterministicIntentClassifier()
+
+    def _compound_fallback_decision(self, user_text: str) -> Optional[NeuralDecision]:
+        """Build a conservative multi-step fallback for explicit compound commands."""
+        cleaned = (user_text or "").strip()
+        lower = cleaned.lower()
+
+        # Split obvious sequential clauses while keeping punctuation-independent commands.
+        clauses = [
+            c.strip(" ,.;")
+            for c in __import__("re").split(r"\b(?:then|after that|next)\b|[,;]+|\band\b", cleaned, flags=__import__("re").IGNORECASE)
+            if c.strip(" ,.;")
+        ]
+
+        steps: List[NeuralPlanStep] = []
+        seen = set()
+
+        def add(tool: str, arguments: Dict[str, Any], description: str):
+            key = (tool, json.dumps(arguments, sort_keys=True, default=str))
+            if key in seen:
+                return
+            schema = self.tool_registry.get(tool)
+            if not schema:
+                return
+            valid, _ = schema.validate_arguments(arguments)
+            if not valid:
+                return
+            seen.add(key)
+            steps.append(NeuralPlanStep(
+                tool=tool,
+                arguments=arguments,
+                name=description,
+                description=description
+            ))
+
+        for clause in clauses:
+            c_lower = clause.lower()
+
+            if "screenshot" in c_lower or "capture screen" in c_lower:
+                add("capture_screen", {}, "Capture the current screen")
+                continue
+
+            if (
+                ("open" in c_lower and "project" in c_lower and "folder" in c_lower)
+                or "open project folder" in c_lower
+            ):
+                project_path = getattr(self.context_builder.developer, "active_project_path", None)
+                args = {"application": "Explorer"}
+                if project_path:
+                    args["path"] = str(project_path)
+                add("open_application", args, "Open the active project folder")
+                continue
+
+            if any(term in c_lower for term in [
+                "find where this error", "find where the error", "check project",
+                "inspect project", "find the error", "scan project", "what should i change"
+            ]):
+                add("inspect_project", {"target": "active_project"}, "Inspect the active project for the error")
+                continue
+
+            classified = self.fallback_classifier.classify_and_extract(clause)
+            tool = classified.get("tool")
+            if tool:
+                add(
+                    tool,
+                    classified.get("arguments", {}) or {},
+                    classified.get("summary", f"Execute {tool}")
+                )
+
+        # Whole-query hints cover clauses the simple splitter may phrase awkwardly.
+        if "screenshot" in lower:
+            add("capture_screen", {}, "Capture the current screen")
+        if "project" in lower and any(term in lower for term in ["error", "wrong", "issue", "inspect", "check"]):
+            add("inspect_project", {"target": "active_project"}, "Inspect the active project")
+
+        if len(steps) < 2:
+            return None
+
+        return NeuralDecision(
+            decision_type="plan",
+            goal=cleaned,
+            steps=steps,
+            confidence=0.92,
+            reasoning="Deterministic compound-command fallback"
+        )
+
+    def _has_multiple_operational_actions(self, user_text: str) -> bool:
+        return self._compound_fallback_decision(user_text) is not None
 
     def _is_context_command(self, user_text: str) -> bool:
         lower = (user_text or "").strip().lower()
@@ -76,6 +163,10 @@ class MayaBrain:
                 "verified": True,
                 "timestamp": time.time(),
             }
+
+        # Compound commands belong to the planner, not the one-shot context handler.
+        if self._has_multiple_operational_actions(cleaned):
+            return None
 
         if self.unified_context is None:
             return None
@@ -358,7 +449,8 @@ class MayaBrain:
         intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
         detected_tool = intent_info.get("tool")
         intent = intent_info.get("intent", "CHAT")
-        if not detected_tool and intent in ["QUESTION", "SUGGESTION", "CHAT"]:
+        compound_fallback = self._compound_fallback_decision(cleaned_query)
+        if not detected_tool and compound_fallback is None and intent in ["QUESTION", "SUGGESTION", "CHAT"]:
             self.planner.emit("maya.state.changed", {"state": "THINKING"})
             ctx = self.context_builder.build_chat_context(cleaned_query)
             policy = self.personality.policy(
@@ -406,12 +498,18 @@ class MayaBrain:
         # 4. Fallback if model did not return a valid structured decision for an action command
         fallback_used = False
 
-        if not decision or not getattr(decision, "is_valid", True) or (decision.decision_type == "conversation" and detected_tool):
+        if (
+            not decision
+            or not getattr(decision, "is_valid", True)
+            or (decision.decision_type == "conversation" and (detected_tool or compound_fallback is not None))
+        ):
             fallback_used = True
             print(f"[MayaBrain] Triggering deterministic safety fallback for: '{cleaned_query}'")
             intent = intent_info.get("intent", "CHAT")
 
-            if detected_tool:
+            if compound_fallback is not None:
+                decision = compound_fallback
+            elif detected_tool:
                 decision = NeuralDecision(
                     decision_type="tool_call",
                     tool=detected_tool,
