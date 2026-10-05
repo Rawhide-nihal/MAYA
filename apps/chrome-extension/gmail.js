@@ -135,7 +135,8 @@
       sent: Boolean(sentNotice),
       service: 'gmail',
       recipient,
-      error: sentNotice ? undefined : 'Gmail did not expose a verified “Message sent” state.'
+      send_attempted: true,
+      error: sentNotice ? undefined : 'MAYA clicked Send, but Gmail did not expose a verified “Message sent” state. Check Sent mail before retrying to avoid duplicates.'
     };
   }
 
