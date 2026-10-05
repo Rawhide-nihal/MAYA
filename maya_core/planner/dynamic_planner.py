@@ -809,6 +809,18 @@ class DynamicTaskPlanner:
             summary = f"Web search for '{arguments.get('query')}'"
 
         # Authenticated communication tools
+        elif tool_name == "sync_communication_contacts":
+            service = arguments.get("service", "whatsapp")
+            result = self.communication.sync_contacts(
+                service=service,
+                profile=arguments.get("profile", "main"),
+            )
+            summary = (
+                f"Synced {result.get('contacts_synced', result.get('local_contact_count', 0))} {service.title()} contact/chat names"
+                if result.get("success")
+                else f"Failed to sync {service.title()} contacts"
+            )
+
         elif tool_name == "prepare_communication":
             result = self.communication.prepare(
                 service=arguments.get("service", ""),
