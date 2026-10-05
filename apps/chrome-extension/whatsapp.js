@@ -73,6 +73,19 @@
       null;
   }
 
+  function findContactPickerBackButton() {
+    return M.findByAriaContains('back', '[aria-label]') ||
+      Array.from(document.querySelectorAll('button, [role="button"]'))
+        .filter(M.visible)
+        .find(el => {
+          const title = M.normalize(el.getAttribute('title'));
+          const aria = M.normalize(el.getAttribute('aria-label'));
+          return title === 'back' || aria === 'back' || Boolean(el.querySelector('[data-icon*="back"]'));
+        }) ||
+      document.querySelector('[data-icon*="back"]')?.closest('[role="button"], button') ||
+      null;
+  }
+
   function findContactScrollContainer() {
     const candidates = Array.from(document.querySelectorAll('div'))
       .filter(M.visible)
@@ -147,8 +160,13 @@
     reportContacts(Array.from(collected), 'whatsapp_contact_picker');
 
     // Close the picker without selecting anybody.
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+    const backButton = findContactPickerBackButton();
+    if (backButton) {
+      backButton.click();
+    } else {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
+    }
 
     return {
       success: collected.size > 0,
