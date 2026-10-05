@@ -75,6 +75,20 @@ async function reportActiveTabContext() {
 setInterval(reportActiveTabContext, 1500);
 reportActiveTabContext();
 
+chrome.tabs.onActivated.addListener(() => {
+  reportActiveTabContext();
+});
+
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+  if (changeInfo.status === 'complete' || changeInfo.url || changeInfo.title) {
+    reportActiveTabContext();
+  }
+});
+
+chrome.windows.onFocusChanged.addListener(() => {
+  reportActiveTabContext();
+});
+
 async function postResult(commandId, result) {
   try {
     const token = await getToken();
