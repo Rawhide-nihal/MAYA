@@ -44,6 +44,69 @@ class MayaBrain:
         # Deterministic classifier reserved as emergency safety fallback
         self.fallback_classifier = DeterministicIntentClassifier()
 
+    def _reference_to_path(self, reference: str) -> Optional[str]:
+        if self.unified_context is None:
+            return None
+        entity = self.unified_context.resolve_reference(reference)
+        if not entity:
+            return None
+
+        value = entity.get("value")
+        kind = entity.get("kind")
+
+        if kind == "file" and isinstance(value, str):
+            return value
+
+        if isinstance(value, dict):
+            for key in ("saved_path", "filepath", "path"):
+                candidate = value.get(key)
+                if candidate:
+                    return str(candidate)
+
+        if isinstance(value, str):
+            return value
+        return None
+
+    def _resolve_argument_references(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve file/screenshot pronouns in tool arguments against session context."""
+        if self.unified_context is None or not isinstance(arguments, dict):
+            return arguments
+
+        reference_values = {
+            "this", "that", "it", "this file", "that file", "the file",
+            "latest file", "this document", "that document", "the document",
+            "latest attachment", "this attachment", "that attachment",
+            "this screenshot", "that screenshot", "the screenshot",
+            "latest screenshot", "previous screenshot", "before"
+        }
+        path_keys = {
+            "filepath", "path", "source", "attachment_path",
+            "project_path", "directory", "target"
+        }
+
+        resolved = dict(arguments)
+        for key, value in list(resolved.items()):
+            if key not in path_keys or not isinstance(value, str):
+                continue
+            normalized = value.strip().lower()
+            if normalized not in reference_values and "screenshot" not in normalized:
+                continue
+            path = self._reference_to_path(value)
+            if path:
+                resolved[key] = path
+        return resolved
+
+    def _resolve_decision_references(self, decision: NeuralDecision) -> NeuralDecision:
+        if self.unified_context is None:
+            return decision
+
+        if decision.decision_type == "tool_call":
+            decision.arguments = self._resolve_argument_references(decision.arguments or {})
+        elif decision.decision_type == "plan":
+            for step in decision.steps:
+                step.arguments = self._resolve_argument_references(step.arguments or {})
+        return decision
+
     def _compound_fallback_decision(self, user_text: str) -> Optional[NeuralDecision]:
         """Build a conservative multi-step fallback for explicit compound commands."""
         cleaned = (user_text or "").strip()
@@ -635,6 +698,8 @@ class MayaBrain:
                     message=raw_output or "I processed your request.",
                     confidence=0.8
                 )
+
+        decision = self._resolve_decision_references(decision)
 
         # 5. Route based on validated decision type
         if decision.decision_type == "conversation":
