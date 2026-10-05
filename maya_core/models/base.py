@@ -127,6 +127,54 @@ class DeterministicIntentClassifier:
                 "summary": "Undo last reversible action"
             }
 
+        # Authenticated communication fallback.
+        # Conservative parsing keeps ambiguous recipients from being sent accidentally.
+        email_patterns = [
+            r"^(?:send\s+(?:an?\s+)?email\s+to|email|mail)\s+([^:,-]+?)\s*[:,-]\s*(.+)$",
+        ]
+        for pattern in email_patterns:
+            m = re.match(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
+            if m:
+                recipient = m.group(1).strip()
+                message = m.group(2).strip()
+                return {
+                    "intent": "PC_ACTION",
+                    "tool": "send_communication",
+                    "arguments": {
+                        "service": "gmail",
+                        "recipient": recipient,
+                        "message": message,
+                        "profile": "main"
+                    },
+                    "confidence": 0.97,
+                    "summary": f"Send Gmail message to {recipient}"
+                }
+
+        messaging_patterns = [
+            r"^(?:send\s+(?:a\s+)?(whatsapp|telegram)\s+(?:message\s+)?to)\s+([^:,-]+?)\s*[:,-]\s*(.+)$",
+            r"^(?:message|msg|text)\s+(.+?)\s+on\s+(whatsapp|telegram)\s*[:,-]\s*(.+)$",
+        ]
+        for index, pattern in enumerate(messaging_patterns):
+            m = re.match(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
+            if not m:
+                continue
+            if index == 0:
+                service, recipient, message = m.group(1), m.group(2), m.group(3)
+            else:
+                recipient, service, message = m.group(1), m.group(2), m.group(3)
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": recipient.strip(),
+                    "message": message.strip(),
+                    "profile": "main"
+                },
+                "confidence": 0.97,
+                "summary": f"Send {service} message to {recipient.strip()}"
+            }
+
         # Check for open application (VS Code, Notepad, Chrome, Explorer, Terminal, etc.)
         match_app = re.search(r"\b(?:open|launch|start|run)\s+(?:application\s+|app\s+)?([a-zA-Z0-9\s\.\-_]+?)(?:\s+and\s+|\s*$|\.|\?)", lower)
         if match_app:
