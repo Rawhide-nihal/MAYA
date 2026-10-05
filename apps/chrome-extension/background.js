@@ -49,6 +49,7 @@ async function reportActiveTabContext() {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const tab = tabs?.[0];
     if (!tab) return;
+    const windowTabs = await chrome.tabs.query({ windowId: tab.windowId });
 
     const response = await fetch(`${MAYA_API}/browser/context`, {
       method: 'POST',
@@ -60,7 +61,8 @@ async function reportActiveTabContext() {
         title: tab.title || '',
         url: tab.url || '',
         tab_id: tab.id ?? null,
-        window_id: tab.windowId ?? null
+        window_id: tab.windowId ?? null,
+        tab_count: windowTabs?.length ?? null
       })
     });
 
