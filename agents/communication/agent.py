@@ -7,6 +7,7 @@ extension running inside that profile.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 from typing import Any, Dict, Optional
 
 from agents.communication.bridge import CommunicationBridge, communication_bridge
@@ -91,18 +92,49 @@ class CommunicationAgent:
                     ),
                 }
 
-        launch = self.windows.launch_application(
-            "Google Chrome",
-            arguments=[SERVICE_URLS[service_name]],
-            profile=profile or "main",
-        )
-        if not launch.get("success"):
-            return {
-                "success": False,
-                "verified": False,
-                "error": launch.get("error", "Could not launch Chrome."),
-                "launch": launch,
+        current_chat = recipient.lower() in {"current chat", "current conversation"}
+        target_tab_id = None
+
+        if current_chat:
+            browser_context = self.bridge.get_browser_context()
+            active_url = str(browser_context.get("url") or "")
+            active_host = (urlparse(active_url).hostname or "").lower()
+            expected_hosts = {
+                "whatsapp": "web.whatsapp.com",
+                "telegram": "web.telegram.org",
             }
+            expected_host = expected_hosts.get(service_name)
+            target_tab_id = browser_context.get("tab_id")
+
+            if not expected_host or active_host != expected_host or target_tab_id is None:
+                return {
+                    "success": False,
+                    "verified": False,
+                    "error": (
+                        f"Open the exact {service_name.title()} conversation you want in the active Chrome tab, "
+                        "then retry. MAYA refused to guess which chat you meant."
+                    ),
+                }
+
+            launch = {
+                "success": True,
+                "verified": True,
+                "profile_name": profile or "main",
+                "reused_active_tab": True,
+            }
+        else:
+            launch = self.windows.launch_application(
+                "Google Chrome",
+                arguments=[SERVICE_URLS[service_name]],
+                profile=profile or "main",
+            )
+            if not launch.get("success"):
+                return {
+                    "success": False,
+                    "verified": False,
+                    "error": launch.get("error", "Could not launch Chrome."),
+                    "launch": launch,
+                }
 
         command = {
             "service": service_name,
@@ -112,6 +144,7 @@ class CommunicationAgent:
             "subject": (subject or "").strip(),
             "profile": profile or "main",
             "attachment_path": expanded_attachment,
+            "target_tab_id": target_tab_id,
         }
         result = self.bridge.submit(command, timeout=30.0)
         result.setdefault("service", service_name)
