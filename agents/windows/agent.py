@@ -20,8 +20,10 @@ try:
     import win32gui
     import win32con
     import win32process
+    import win32clipboard
     HAS_WIN32 = True
 except ImportError:
+    win32clipboard = None
     HAS_WIN32 = False
 
 try:
@@ -196,6 +198,222 @@ class WindowsAgent:
                 f"Could not resolve Chrome profile hint '{raw_hint or 'main'}'. "
                 "Run scripts\\configure_chrome_main_profile.py to select it explicitly."
             )
+        }
+
+    def _recent_file_roots(self) -> List[str]:
+        """User-facing locations MAYA may inspect for recent-file references."""
+        from maya_core.config import get_user_screenshots_dir
+
+        home = Path.home()
+        candidates = [
+            get_user_screenshots_dir(),
+            home / "Downloads",
+            home / "Desktop",
+            home / "Documents",
+            home / "Pictures",
+        ]
+        roots: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            try:
+                resolved = str(Path(candidate).expanduser().resolve())
+            except Exception:
+                resolved = str(candidate)
+            key = os.path.normcase(resolved)
+            if key in seen or not os.path.isdir(resolved):
+                continue
+            seen.add(key)
+            roots.append(resolved)
+        return roots
+
+    def resolve_file_reference(self, reference: str) -> Dict[str, Any]:
+        """
+        Resolve either a real path or a natural recent-file selector.
+
+        Examples: latest screenshot, recent PNG, most recent JPEG, latest image,
+        latest file. Search is intentionally limited to normal user folders.
+        """
+        raw = str(reference or "").strip().strip('"')
+        if not raw:
+            return {"success": False, "verified": False, "error": "File reference is empty."}
+
+        candidate = Path(raw).expanduser()
+        if candidate.is_file():
+            resolved = str(candidate.resolve())
+            return {
+                "success": True,
+                "verified": True,
+                "path": resolved,
+                "name": Path(resolved).name,
+                "resolution": "explicit_path",
+            }
+
+        lower = " ".join(raw.lower().split())
+        screenshot_terms = {"screenshot", "screen shot", "screen capture"}
+        image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+        extensions: Optional[set[str]] = None
+        roots = self._recent_file_roots()
+
+        if any(term in lower for term in screenshot_terms):
+            from maya_core.config import get_user_screenshots_dir
+            roots = [str(get_user_screenshots_dir())]
+            extensions = image_exts
+        elif "png" in lower:
+            extensions = {".png"}
+        elif "jpeg" in lower or "jpg" in lower:
+            extensions = {".jpg", ".jpeg"}
+        elif "image" in lower or "picture" in lower or "photo" in lower:
+            extensions = image_exts
+
+        recent_words = ("latest", "recent", "most recent", "newest", "last")
+        if not any(word in lower for word in recent_words) and not any(
+            term in lower for term in screenshot_terms
+        ):
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"File does not exist and is not a recognized recent-file reference: {raw}",
+            }
+
+        matches: List[tuple[float, str]] = []
+        for root in roots:
+            try:
+                for base, dirs, files in os.walk(root):
+                    # Keep scans bounded and avoid descending through huge/cache trees.
+                    relative_depth = Path(base).relative_to(Path(root)).parts
+                    if len(relative_depth) >= 3:
+                        dirs[:] = []
+                    for name in files:
+                        path = os.path.join(base, name)
+                        ext = Path(name).suffix.lower()
+                        if extensions is not None and ext not in extensions:
+                            continue
+                        try:
+                            modified = os.path.getmtime(path)
+                        except OSError:
+                            continue
+                        matches.append((modified, path))
+            except (OSError, ValueError):
+                continue
+
+        if not matches:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"No matching recent file was found for '{raw}'.",
+            }
+
+        matches.sort(key=lambda item: item[0], reverse=True)
+        resolved = str(Path(matches[0][1]).resolve())
+        return {
+            "success": True,
+            "verified": True,
+            "path": resolved,
+            "name": Path(resolved).name,
+            "modified_at": matches[0][0],
+            "resolution": "recent_file",
+            "query": raw,
+        }
+
+    def open_file(self, filepath: str) -> Dict[str, Any]:
+        resolved = self.resolve_file_reference(filepath)
+        if not resolved.get("success"):
+            return resolved
+
+        path = resolved["path"]
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen(
+                    [opener, path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+            return {
+                **resolved,
+                "success": True,
+                "verified": os.path.isfile(path),
+                "opened": True,
+                "message": f"Opened {Path(path).name}",
+            }
+        except Exception as exc:
+            return {
+                **resolved,
+                "success": False,
+                "verified": False,
+                "opened": False,
+                "error": f"Could not open file: {exc}",
+            }
+
+    def copy_file_to_clipboard(self, filepath: str) -> Dict[str, Any]:
+        """Put an actual file object on the Windows clipboard (CF_HDROP)."""
+        resolved = self.resolve_file_reference(filepath)
+        if not resolved.get("success"):
+            return resolved
+        path = resolved["path"]
+
+        if sys.platform != "win32" or not HAS_WIN32 or win32clipboard is None:
+            return {
+                **resolved,
+                "success": False,
+                "verified": False,
+                "error": "File clipboard copy requires Windows pywin32 support.",
+            }
+
+        opened = False
+        try:
+            win32clipboard.OpenClipboard()
+            opened = True
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, (path,))
+        except Exception as exc:
+            return {
+                **resolved,
+                "success": False,
+                "verified": False,
+                "error": f"Could not place file on Windows clipboard: {exc}",
+            }
+        finally:
+            if opened:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+
+        verify_open = False
+        verified = False
+        try:
+            win32clipboard.OpenClipboard()
+            verify_open = True
+            copied = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+            normalized = os.path.normcase(os.path.abspath(path))
+            verified = any(
+                os.path.normcase(os.path.abspath(str(item))) == normalized
+                for item in (copied or ())
+            )
+        except Exception:
+            verified = False
+        finally:
+            if verify_open:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+
+        return {
+            **resolved,
+            "success": verified,
+            "verified": verified,
+            "clipboard_format": "CF_HDROP",
+            "message": (
+                f"Copied {Path(path).name} to the Windows file clipboard."
+                if verified else
+                "Windows accepted the clipboard operation, but MAYA could not verify the file payload."
+            ),
         }
 
     def find_application_path(self, app_name: str) -> Optional[str]:
