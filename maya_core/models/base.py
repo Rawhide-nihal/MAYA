@@ -127,6 +127,29 @@ class DeterministicIntentClassifier:
                 "summary": "Undo last reversible action"
             }
 
+        paste_current_chat = re.match(
+            r"^(?:now\s+)?(?:paste|attach)\s+"
+            r"((?:this|that|the|latest|previous)(?:\s+(?:screenshot|file|document|attachment))?)"
+            r"\s+(?:into|to)\s+(whatsapp|telegram)$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if paste_current_chat:
+            attachment_ref, service = paste_current_chat.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "prepare_communication",
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": "current chat",
+                    "message": "",
+                    "profile": "main",
+                    "attachment_path": attachment_ref.strip()
+                },
+                "confidence": 0.99,
+                "summary": f"Prepare {attachment_ref.strip()} in the current {service} chat"
+            }
+
         # Context-linked file/screenshot communication.
         attachment_chat = re.match(
             r"^(?:send|share)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
