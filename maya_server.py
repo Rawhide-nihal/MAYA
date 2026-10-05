@@ -165,7 +165,7 @@ def get_status():
     return jsonify({
         "status": "online",
         "maya_core": "Active",
-        "local_ai_ready": True,
+        "local_ai_ready": model_info.get("lifecycle_state") == "READY",
         "offline_only": settings.get("offline_only", True),
         "metrics": summary,
         "model": model_info,
@@ -251,10 +251,13 @@ def voice_ptt():
     if not audio_b64:
         return jsonify({"success": False, "error": "Missing audio_base64"}), 400
     try:
-        pcm_bytes = base64.b64decode(audio_b64)
-        amp = calculate_pcm_rms(pcm_bytes[:2048])
+        wav_bytes = base64.b64decode(audio_b64)
+        # Frontend sends a genuine 16-bit PCM WAV. Skip the 44-byte header
+        # when calculating visual amplitude.
+        pcm_preview = wav_bytes[44:2092] if wav_bytes[:4] == b"RIFF" else b""
+        amp = calculate_pcm_rms(pcm_preview)
         dispatch_event(VOICE_LISTENING_AMPLITUDE, {"amplitude": amp})
-        res = voice.process_ptt_audio(pcm_bytes)
+        res = voice.process_ptt_audio(wav_bytes)
         return jsonify(res)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -323,6 +326,9 @@ def get_hw():
 
 def start_server(host="127.0.0.1", port=5000):
     print(f"Starting MAYA Core Server V2 on http://{host}:{port} ...")
+    # Warm the local model before the first real conversation. The server
+    # remains available while loading; /api/status reports readiness truthfully.
+    threading.Thread(target=model_runtime.manager.warm_up, daemon=True).start()
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
