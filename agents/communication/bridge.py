@@ -87,6 +87,7 @@ class CommunicationBridge:
         }
         added = 0
         updated = 0
+        persistent_change = False
         now = time.time()
 
         with self._lock:
@@ -108,6 +109,8 @@ class CommunicationBridge:
 
                 existing = store.get(normalized)
                 if existing:
+                    if existing.get("name") != name or existing.get("source") != source:
+                        persistent_change = True
                     existing["name"] = name
                     existing["last_seen"] = now
                     existing["source"] = source
@@ -120,8 +123,10 @@ class CommunicationBridge:
                         "source": source,
                     }
                     added += 1
+                    persistent_change = True
 
-            self._save_contacts()
+            if persistent_change:
+                self._save_contacts()
             total = len(store)
 
         return {
