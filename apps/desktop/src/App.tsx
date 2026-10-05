@@ -181,7 +181,8 @@ export const App: React.FC = () => {
 
         {/* Center Main Stage */}
         <main className="flex-1 flex flex-col h-full bg-[#070b14]/50 overflow-hidden relative">
-          {currentTab === 'chat' && (
+          {/* Keep ChatStage mounted so navigation never destroys an active conversation/stream. */}
+          <div className={currentTab === 'chat' ? 'flex flex-1 h-full overflow-hidden' : 'hidden'}>
             <ChatStage
               coreState={coreState}
               subState={subState}
@@ -190,7 +191,7 @@ export const App: React.FC = () => {
               onTasksUpdate={(tasks) => setActiveTasks(tasks)}
               onActionCompleted={fetchTelemetry}
             />
-          )}
+          </div>
           {currentTab === 'projects' && <ProjectsPage />}
           {currentTab === 'pc_control' && <PCControlPage />}
           {currentTab === 'memory' && <MemoryPage />}
