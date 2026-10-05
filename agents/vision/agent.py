@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from PIL import ImageGrab
 from maya_core.config import SCREENSHOTS_DIR
+from agents.vision.ocr import windows_ocr
 
 try:
     import win32gui
@@ -182,14 +183,44 @@ class VisionAgent:
                     "bbox": w["bbox"]
                 })
 
+        ocr = {"success": False, "available": False, "text": "", "lines": []}
+        screenshot_path = cap.get("filepath")
+        if screenshot_path:
+            try:
+                ocr = windows_ocr.recognize_file(screenshot_path)
+            except Exception:
+                pass
+
+        ocr_errors = []
+        if ocr.get("success") and ocr.get("text"):
+            for line in ocr.get("lines", []):
+                text = str(line.get("text", ""))
+                low = text.lower()
+                if any(term in low for term in [
+                    "error", "exception", "failed", "failure", "fatal",
+                    "warning", "traceback", "not responding"
+                ]):
+                    ocr_errors.append({
+                        "source": "windows_ocr",
+                        "text": text,
+                        "words": line.get("words", []),
+                        "severity": "CRITICAL" if any(term in low for term in ["fatal", "not responding"]) else "WARNING",
+                    })
+
         return {
-            "screenshot_path": cap.get("filepath"),
+            "screenshot_path": screenshot_path,
             "display_resolution": f"{cap.get('width', 1920)}x{cap.get('height', 1080)}",
             "active_window": active_win["title"] if active_win else "Desktop",
             "active_window_details": active_win,
             "total_windows_detected": len(windows),
             "elements": dialog_elements,
-            "visible_errors": visible_errors,
-            "scene_summary": f"Active: {active_win['title'] if active_win else 'Desktop'}. {len(dialog_elements)} alert dialog(s) found. {len(visible_errors)} visible errors detected."
+            "visible_errors": visible_errors + ocr_errors,
+            "ocr": ocr,
+            "scene_summary": (
+                f"Active: {active_win['title'] if active_win else 'Desktop'}. "
+                f"{len(dialog_elements)} alert dialog(s) found. "
+                f"{len(visible_errors) + len(ocr_errors)} visible error signal(s) detected. "
+                f"OCR text available: {bool(ocr.get('success') and ocr.get('text'))}."
+            )
         }
 
