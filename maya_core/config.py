@@ -64,7 +64,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "screen_capture_privacy": "Always",
     "context_clipboard_enabled": True,
     "context_recent_files_enabled": True,
-    "attachment_max_mb": 75
+    "attachment_max_mb": 75,
+    "communication_attachment_max_mb": 12
 }
 
 def get_or_create_auth_token() -> str:
