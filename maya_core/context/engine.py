@@ -168,6 +168,14 @@ class UnifiedContextEngine:
         try:
             if source.resolve() != session_path.resolve():
                 shutil.copy2(source, session_path)
+                # capture_screen historically writes to the permanent screenshot
+                # directory. Context captures are temporary by default, so remove
+                # that transient source after safely copying it into this session.
+                try:
+                    if source.parent.resolve() == SCREENSHOTS_DIR.resolve():
+                        source.unlink()
+                except Exception:
+                    pass
             else:
                 session_path = source
         except Exception:
