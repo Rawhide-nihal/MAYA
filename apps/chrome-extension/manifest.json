@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MAYA Browser Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local authenticated browser bridge for MAYA communication actions.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzh0kSUAsuTjjA1YIXYzlfzQuacin2PhvXODUrnurknmwkJBEe/dU+B5AaHhTc2uomLGCWHUff6lzGwaAmHEKbCX3iZ1T4LstN4GwdaHX2KjeiHRG7j9irbzar2lT+1qb/gt46npeDeAD6P4jBv8RiErJkGmaDZnoUAMa/qkZ58ttQOqF5bSxO2Vf/EsZnMMqLm65NmCE7WjUqHDftMIf+dR2wdhgS/gcfoor1dVvzsPd4Ccolq0LaVBGxjUQR8yvndjfUznWrengFgyIglLzD/WYDvYPiYRYzVxlLzC8MP0iqhMYv5VApta41+zz/nR07v/tKFgo+bmBee/Am3xm1QIDAQAB",
   "permissions": ["tabs"],
