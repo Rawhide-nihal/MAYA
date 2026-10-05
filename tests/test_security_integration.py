@@ -17,6 +17,7 @@ from pathlib import Path
 
 from maya_server import app, AUTH_TOKEN, permissions, planner, ledger, communication_bridge, unified_context
 from security.permissions.tier import PermissionLevel, PermissionManager, hash_arguments
+from agents.communication.bridge import CommunicationBridge
 
 class TestSecurityIntegration(unittest.TestCase):
     def setUp(self):
@@ -237,6 +238,48 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertEqual(ctx.status_code, 200)
         ctx_data = ctx.get_json()
         self.assertTrue(ctx_data.get("attachments"))
+
+    def test_current_chat_command_dispatches_only_to_bound_tab(self):
+        bridge = CommunicationBridge()
+        holder = {}
+
+        command = {
+            "service": "whatsapp",
+            "action": "compose",
+            "recipient": "current chat",
+            "message": "",
+            "target_tab_id": 42,
+        }
+
+        def submit():
+            holder["result"] = bridge.submit(command, timeout=3.0)
+
+        worker = threading.Thread(target=submit, daemon=True)
+        worker.start()
+
+        # Wrong WhatsApp tab must not receive a command bound to tab 42.
+        wrong = None
+        for _ in range(20):
+            wrong = bridge.next_command("whatsapp", tab_id=99)
+            if wrong is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNone(wrong)
+
+        correct = bridge.next_command("whatsapp", tab_id=42)
+        self.assertIsNotNone(correct)
+        self.assertEqual(correct["recipient"], "current chat")
+        self.assertNotIn("target_tab_id", correct)
+
+        bridge.complete(correct["command_id"], {
+            "success": True,
+            "verified": True,
+            "prepared": True,
+            "sent": False,
+        })
+        worker.join(timeout=1.5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder.get("result", {}).get("success"))
 
     def test_communication_attachment_is_bound_to_active_dispatched_command(self):
         attachment = unified_context.session_dir / "bridge_test.txt"
