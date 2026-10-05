@@ -385,8 +385,8 @@ class UnifiedContextEngine:
 
         return None
 
-    def prompt_fragment(self) -> str:
-        snapshot = self.snapshot(include_processes=False)
+    def prompt_fragment(self, snapshot: Optional[Dict[str, Any]] = None) -> str:
+        snapshot = snapshot or self.snapshot(include_processes=False)
         parts = ["\nLIVE MAYA CONTEXT:"]
         title = snapshot.get("active_window_title")
         if title:
