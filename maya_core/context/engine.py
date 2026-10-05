@@ -17,6 +17,7 @@ from typing import Any, Deque, Dict, List, Optional
 from PIL import Image, ImageChops, ImageStat
 
 from maya_core.config import CACHE_DIR, SCREENSHOTS_DIR, settings
+from agents.vision.ocr import windows_ocr
 
 
 class UnifiedContextEngine:
@@ -204,6 +205,28 @@ class UnifiedContextEngine:
         active = next((w for w in windows if w.get("is_active")), None)
         errors = self.vision.extract_visible_errors(str(session_path))
 
+        ocr = {"success": False, "available": False, "text": "", "lines": []}
+        try:
+            ocr = windows_ocr.recognize_file(str(session_path))
+        except Exception:
+            pass
+
+        if ocr.get("success"):
+            for line in ocr.get("lines", []):
+                text = str(line.get("text", ""))
+                low = text.lower()
+                if any(term in low for term in [
+                    "error", "exception", "failed", "failure",
+                    "fatal", "warning", "traceback", "not responding"
+                ]):
+                    errors.append({
+                        "source": "windows_ocr",
+                        "text": text,
+                        "words": line.get("words", []),
+                        "severity": "CRITICAL" if any(term in low for term in ["fatal", "not responding"]) else "WARNING",
+                        "description": f"OCR alert text: {text}",
+                    })
+
         record = {
             "id": uuid.uuid4().hex[:12],
             "kind": "screenshot",
@@ -214,6 +237,7 @@ class UnifiedContextEngine:
             "height": cap.get("height"),
             "active_window": active,
             "visible_errors": errors,
+            "ocr": ocr,
             "label": label,
             "saved": False,
         }
