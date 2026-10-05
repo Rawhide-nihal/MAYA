@@ -38,6 +38,47 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOTS_DIR = MAYA_DATA_DIR / "screenshots"
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
+def get_user_screenshots_dir() -> Path:
+    """
+    Resolve the user's real Windows Pictures/Screenshots directory.
+
+    Priority:
+    1. Explicit MAYA_SCREENSHOT_DIR environment override.
+    2. OneDrive/OneDriveConsumer Pictures/Screenshots when available.
+    3. Standard ~/Pictures/Screenshots fallback.
+
+    This keeps screenshots visible in File Explorer like Win+PrintScreen rather
+    than hiding them inside MAYA's private AppData cache.
+    """
+    explicit = os.environ.get("MAYA_SCREENSHOT_DIR", "").strip()
+    if explicit:
+        target = Path(explicit).expanduser()
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    if sys.platform == "win32":
+        for env_name in ("OneDrive", "OneDriveConsumer"):
+            root = os.environ.get(env_name, "").strip()
+            if root:
+                target = Path(root) / "Pictures" / "Screenshots"
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                    return target
+                except OSError:
+                    pass
+
+        home_onedrive = Path.home() / "OneDrive" / "Pictures" / "Screenshots"
+        if (Path.home() / "OneDrive").exists():
+            try:
+                home_onedrive.mkdir(parents=True, exist_ok=True)
+                return home_onedrive
+            except OSError:
+                pass
+
+    fallback = Path.home() / "Pictures" / "Screenshots"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
 SETTINGS_FILE = MAYA_DATA_DIR / "settings.json"
 AUTH_TOKEN_FILE = MAYA_DATA_DIR / "auth.token"
 
