@@ -356,6 +356,36 @@ class TestSecurityIntegration(unittest.TestCase):
         )
         self.assertEqual(after_completion.status_code, 404)
 
+    def test_contact_index_api_requires_auth(self):
+        unauthorized = self.client.post(
+            "/api/communication/contacts",
+            json={
+                "service": "whatsapp",
+                "contacts": ["Private Contact"]
+            }
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        authorized = self.client.post(
+            "/api/communication/contacts",
+            headers=self.auth_headers,
+            json={
+                "service": "whatsapp",
+                "contacts": ["Private Contact"],
+                "source": "security_test"
+            }
+        )
+        self.assertEqual(authorized.status_code, 200)
+        data = authorized.get_json()
+        self.assertTrue(data.get("success"))
+
+        listed = self.client.get(
+            "/api/communication/contacts?service=whatsapp",
+            headers={"X-Maya-Token": AUTH_TOKEN}
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(listed.get_json().get("success"))
+
     def test_browser_context_rejects_unauthorized_update(self):
         bad = self.client.post(
             "/api/browser/context",
