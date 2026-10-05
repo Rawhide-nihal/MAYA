@@ -170,6 +170,13 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r11["arguments"]["recipient"], "current chat")
         self.assertEqual(r11["arguments"]["attachment_path"].lower(), "the screenshot")
 
+        r12 = self.classifier.classify_and_extract(
+            "Open Chrome default profile"
+        )
+        self.assertEqual(r12["tool"], "open_application")
+        self.assertEqual(r12["arguments"]["application"], "Google Chrome")
+        self.assertEqual(r12["arguments"]["profile"], "main")
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
