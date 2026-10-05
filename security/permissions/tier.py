@@ -72,6 +72,8 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "detect_project": PermissionLevel.LEVEL_1_OBSERVATION,
 
     # Safe actions (Level 2)
+    "open_file": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "copy_file_to_clipboard": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "open_application": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "open_application_and_inspect": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "focus_window": PermissionLevel.LEVEL_2_SAFE_ACTION,
