@@ -32,6 +32,7 @@ from agents.terminal.agent import TerminalAgent
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
 from agents.communication.agent import CommunicationAgent
+from agents.communication.bridge import CommunicationBridge
 from maya_core.personality.engine import PersonalityEngine, MayaMode, ResponseDepth
 from maya_core.context.engine import UnifiedContextEngine
 from maya_core.attachments.intelligence import AttachmentIntelligence
@@ -176,6 +177,36 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r12["tool"], "open_application")
         self.assertEqual(r12["arguments"]["application"], "Google Chrome")
         self.assertEqual(r12["arguments"]["profile"], "main")
+
+        r13 = self.classifier.classify_and_extract(
+            "Sync my WhatsApp contacts"
+        )
+        self.assertEqual(r13["tool"], "sync_communication_contacts")
+        self.assertEqual(r13["arguments"]["service"], "whatsapp")
+
+        r14 = self.classifier.classify_and_extract(
+            "Open the latest screenshot"
+        )
+        self.assertEqual(r14["tool"], "open_file")
+        self.assertIn("screenshot", r14["arguments"]["filepath"].lower())
+
+        r15 = self.classifier.classify_and_extract(
+            "Open the recent PNG file"
+        )
+        self.assertEqual(r15["tool"], "open_file")
+        self.assertIn("png", r15["arguments"]["filepath"].lower())
+
+        r16 = self.classifier.classify_and_extract(
+            "Copy the latest screenshot to clipboard"
+        )
+        self.assertEqual(r16["tool"], "copy_file_to_clipboard")
+        self.assertIn("screenshot", r16["arguments"]["filepath"].lower())
+
+        r17 = self.classifier.classify_and_extract(
+            "Copy this file to my clipboard"
+        )
+        self.assertEqual(r17["tool"], "copy_file_to_clipboard")
+        self.assertEqual(r17["arguments"]["filepath"].lower(), "this file")
 
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
@@ -439,6 +470,10 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertIsNotNone(default_tool_registry.get("prepare_communication"))
         self.assertIsNotNone(default_tool_registry.get("send_communication"))
 
+        self.assertIsNotNone(default_tool_registry.get("sync_communication_contacts"))
+        self.assertIsNotNone(default_tool_registry.get("open_file"))
+        self.assertIsNotNone(default_tool_registry.get("copy_file_to_clipboard"))
+
         # Verify argument validation
         valid, err = default_tool_registry.validate_call("open_application", {"application": "VS Code"})
         self.assertTrue(valid)
@@ -513,6 +548,69 @@ class TestMayaPhase2Core(unittest.TestCase):
             fake_bridge.command["attachment_path"],
             str(attachment.resolve())
         )
+
+    def test_whatsapp_contact_index_exact_fuzzy_and_ambiguous_resolution(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+
+        sync = bridge.update_contacts(
+            "whatsapp",
+            ["Rahul Kumar", "Rohan", "Rohit", "Boss Test"],
+            source="unit_test"
+        )
+        self.assertTrue(sync["success"])
+        self.assertEqual(sync["total"], 4)
+
+        exact = bridge.resolve_contact("whatsapp", "Rahul Kumar")
+        self.assertTrue(exact["matched"])
+        self.assertEqual(exact["name"], "Rahul Kumar")
+
+        fuzzy = bridge.resolve_contact("whatsapp", "Rahul Kumer")
+        self.assertTrue(fuzzy["matched"])
+        self.assertEqual(fuzzy["name"], "Rahul Kumar")
+
+        ambiguous = bridge.resolve_contact("whatsapp", "Roh")
+        self.assertFalse(ambiguous["matched"])
+        self.assertTrue(ambiguous["ambiguous"])
+        self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
+
+    def test_recent_screenshot_and_image_file_resolution(self):
+        original = os.environ.get("MAYA_SCREENSHOT_DIR")
+        screenshots = Path(self.temp_dir.name) / "Pictures" / "Screenshots"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        old_png = screenshots / "Screenshot_old.png"
+        new_png = screenshots / "Screenshot_new.png"
+        jpeg = screenshots / "photo.jpeg"
+        old_png.write_bytes(b"old")
+        new_png.write_bytes(b"new")
+        jpeg.write_bytes(b"jpg")
+
+        now = time.time()
+        os.utime(old_png, (now - 30, now - 30))
+        os.utime(jpeg, (now - 20, now - 20))
+        os.utime(new_png, (now - 5, now - 5))
+
+        try:
+            os.environ["MAYA_SCREENSHOT_DIR"] = str(screenshots)
+            agent = WindowsAgent()
+
+            latest = agent.resolve_file_reference("latest screenshot")
+            self.assertTrue(latest["success"])
+            self.assertEqual(Path(latest["path"]).name, "Screenshot_new.png")
+
+            latest_png = agent.resolve_file_reference("recent png file")
+            self.assertTrue(latest_png["success"])
+            self.assertEqual(Path(latest_png["path"]).name, "Screenshot_new.png")
+
+            latest_jpeg = agent.resolve_file_reference("latest jpeg file")
+            self.assertTrue(latest_jpeg["success"])
+            self.assertEqual(Path(latest_jpeg["path"]).name, "photo.jpeg")
+        finally:
+            if original is None:
+                os.environ.pop("MAYA_SCREENSHOT_DIR", None)
+            else:
+                os.environ["MAYA_SCREENSHOT_DIR"] = original
 
     def test_chrome_configured_profile_beats_last_used_and_default_alias(self):
         original_profile = settings.get("chrome_main_profile", "")
