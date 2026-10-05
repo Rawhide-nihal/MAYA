@@ -208,6 +208,18 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r17["tool"], "copy_file_to_clipboard")
         self.assertEqual(r17["arguments"]["filepath"].lower(), "this file")
 
+        r18 = self.classifier.classify_and_extract(
+            r"Copy C:\Users\Boss\Documents\report.pdf to clipboard"
+        )
+        self.assertEqual(r18["tool"], "copy_file_to_clipboard")
+        self.assertTrue(r18["arguments"]["filepath"].lower().endswith("report.pdf"))
+
+        r19 = self.classifier.classify_and_extract(
+            r"Open D:\Projects\archive.zip"
+        )
+        self.assertEqual(r19["tool"], "open_file")
+        self.assertTrue(r19["arguments"]["filepath"].lower().endswith("archive.zip"))
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
