@@ -68,6 +68,49 @@
       .find(element => normalize(element.getAttribute('aria-label')).includes(target)) || null;
   }
 
+  async function fetchAttachment(command) {
+    if (!command?.has_attachment) return null;
+
+    const payload = await chrome.runtime.sendMessage({
+      type: 'maya-fetch-attachment',
+      commandId: command.command_id
+    });
+    if (!payload?.success) {
+      throw new Error(payload?.error || 'MAYA could not load the command attachment.');
+    }
+
+    const binary = atob(payload.base64 || '');
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+
+    return {
+      name: command.attachment_name || payload.name || 'maya-attachment',
+      mime: command.attachment_mime || payload.mime || 'application/octet-stream',
+      size: payload.size || bytes.length,
+      file: new File(
+        [bytes],
+        command.attachment_name || payload.name || 'maya-attachment',
+        { type: command.attachment_mime || payload.mime || 'application/octet-stream' }
+      )
+    };
+  }
+
+  function setFileInput(input, attachment) {
+    if (!input || !attachment?.file) return false;
+    try {
+      const transfer = new DataTransfer();
+      transfer.items.add(attachment.file);
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return input.files?.length === 1;
+    } catch {
+      return false;
+    }
+  }
+
   async function deliver(command, handler) {
     let result;
     try {
@@ -118,6 +161,8 @@
     normalize,
     exactTextElements,
     findByAriaContains,
+    fetchAttachment,
+    setFileInput,
     start
   };
 })();
