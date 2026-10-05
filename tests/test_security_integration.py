@@ -11,6 +11,7 @@ import unittest
 import json
 import time
 import hmac
+import io
 from pathlib import Path
 
 from maya_server import app, AUTH_TOKEN, permissions, planner, ledger
@@ -189,6 +190,39 @@ class TestSecurityIntegration(unittest.TestCase):
 
         self.assertFalse(tampered.granted)
         self.assertTrue(tampered.requires_confirmation)
+
+    def test_attachment_upload_requires_auth_and_registers_context(self):
+        unauth = self.client.post(
+            "/api/attachments",
+            data={"file": (io.BytesIO(b"hello maya"), "note.txt")},
+            content_type="multipart/form-data"
+        )
+        self.assertEqual(unauth.status_code, 401)
+
+        auth = self.client.post(
+            "/api/attachments",
+            headers={"X-Maya-Token": AUTH_TOKEN},
+            data={"file": (io.BytesIO(b"hello maya"), "note.txt")},
+            content_type="multipart/form-data"
+        )
+        self.assertEqual(auth.status_code, 200)
+        data = auth.get_json()
+        self.assertTrue(data.get("success"))
+        self.assertEqual(data.get("name"), "note.txt")
+        self.assertIn("text_extraction", data.get("capabilities", []))
+
+        ctx = self.client.get("/api/context")
+        self.assertEqual(ctx.status_code, 200)
+        ctx_data = ctx.get_json()
+        self.assertTrue(ctx_data.get("attachments"))
+
+    def test_browser_context_rejects_unauthorized_update(self):
+        bad = self.client.post(
+            "/api/browser/context",
+            headers={"X-Maya-Token": "bad-token", "Content-Type": "application/json"},
+            json={"title": "Secret", "url": "https://example.com"}
+        )
+        self.assertEqual(bad.status_code, 401)
 
     # 11. Plan Resume Security: Expired Token Rejection
     def test_expired_token_rejection(self):
