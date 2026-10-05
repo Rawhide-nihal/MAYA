@@ -139,7 +139,8 @@ class MayaBrain:
             "take a screenshot", "take screenshot", "capture screenshot",
             "save that screenshot", "save this screenshot", "keep that screenshot",
             "keep this screenshot", "compare this with before", "compare with before",
-            "compare screenshots", "look at my screen", "check my screen",
+            "compare screenshots", "compare this with the screenshot", "compare screenshot",
+            "look at my screen", "check my screen",
             "what's on my screen", "what is on my screen", "what's this error",
             "what is this error", "read this page", "where should i click",
             "what am i doing", "what's open", "what is open"
@@ -173,7 +174,16 @@ class MayaBrain:
 
         if any(p in lower for p in ["take a screenshot", "take screenshot", "capture screenshot"]):
             should_save = any(p in lower for p in ["keep it", "save it", "keep this", "save this"])
-            result = self.unified_context.capture_screen(save=should_save)
+            label = None
+            import re as _re
+            label_match = _re.search(r"\b(?:label it|call it)\s+(.+)$", cleaned, flags=_re.IGNORECASE)
+            if label_match:
+                label = label_match.group(1).strip(" .")
+            else:
+                before_match = _re.search(r"\bbefore\s+([a-zA-Z0-9 _-]{2,60})$", cleaned, flags=_re.IGNORECASE)
+                if before_match:
+                    label = "before " + before_match.group(1).strip(" .")
+            result = self.unified_context.capture_screen(label=label, save=should_save)
             if result.get("success"):
                 window = ((result.get("active_window") or {}).get("title") or "the current desktop")
                 reply = (
@@ -212,8 +222,16 @@ class MayaBrain:
                 "timestamp": time.time(),
             }
 
-        if any(p in lower for p in ["compare this with before", "compare with before", "compare screenshots"]):
-            result = self.unified_context.compare_screenshots("latest", "previous")
+        if (
+            any(p in lower for p in ["compare this with before", "compare with before", "compare screenshots"])
+            or ("compare" in lower and "screenshot" in lower)
+        ):
+            older_ref = "previous"
+            import re as _re
+            with_match = _re.search(r"\bwith\s+(?:the\s+)?(.+)$", cleaned, flags=_re.IGNORECASE)
+            if with_match:
+                older_ref = with_match.group(1).strip(" .")
+            result = self.unified_context.compare_screenshots("latest", older_ref)
             if result.get("success"):
                 reply = (
                     f"I compared the latest capture with the previous one, Boss. "
