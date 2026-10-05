@@ -34,6 +34,7 @@ class CommunicationBridge:
                 "url": str(context.get("url", ""))[:2000],
                 "window_id": context.get("window_id"),
                 "tab_id": context.get("tab_id"),
+                "tab_count": context.get("tab_count"),
                 "updated_at": time.time(),
             }
 
