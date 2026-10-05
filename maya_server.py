@@ -383,6 +383,9 @@ def communication_status():
 # Unified Context / Attachments
 @app.route("/api/context", methods=["GET"])
 def get_unified_context():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
     return jsonify(unified_context.session_summary())
 
 
@@ -395,6 +398,9 @@ def update_browser_context():
 
 @app.route("/api/browser/context", methods=["GET"])
 def get_browser_context():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
     return jsonify(communication_bridge.get_browser_context())
 
 
