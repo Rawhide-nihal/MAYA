@@ -55,7 +55,7 @@ class ContextBuilder:
         prompt_parts.append(self.personality.prompt_fragment(user_query, live_context))
         if self.unified_context is not None:
             try:
-                prompt_parts.append(self.unified_context.prompt_fragment())
+                prompt_parts.append(self.unified_context.prompt_fragment(live_context))
             except Exception:
                 pass
         if relevant_mems:
