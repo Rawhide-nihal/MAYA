@@ -25,3 +25,10 @@ transformers>=4.38.0
 # HTTP & Web Inspection
 requests>=2.31.0
 urllib3>=2.0.0
+
+
+# Voice: accurate local STT + natural local female TTS
+SpeechRecognition>=3.10.0
+faster-whisper>=1.1.0
+kokoro>=0.9.4
+soundfile>=0.12.1
