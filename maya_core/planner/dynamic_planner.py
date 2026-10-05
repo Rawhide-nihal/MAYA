@@ -29,6 +29,7 @@ class PlanState(str, Enum):
     OBSERVING = "OBSERVING"
     VERIFYING = "VERIFYING"
     COMPLETED = "COMPLETED"
+    PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
@@ -67,6 +68,12 @@ class DynamicTaskPlan:
     completed_at: Optional[float] = None
 
 class DynamicTaskPlanner:
+    NON_FATAL_FAILURE_TOOLS = {
+        "capture_screen", "analyze_screen", "get_system_status",
+        "inspect_project", "search_files", "search_web", "list_directory",
+        "read_file", "report_findings", "get_recent_actions"
+    }
+
     def __init__(
         self,
         permissions: PermissionManager,
@@ -80,6 +87,7 @@ class DynamicTaskPlanner:
         vision: VisionAgent,
         browser: Optional[BrowserAgent] = None,
         communication: Optional[CommunicationAgent] = None,
+        unified_context=None,
         event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
     ):
         self.permissions = permissions
@@ -93,6 +101,7 @@ class DynamicTaskPlanner:
         self.vision = vision
         self.browser = browser or BrowserAgent()
         self.communication = communication or CommunicationAgent(windows=windows)
+        self.unified_context = unified_context
         self.event_callback = event_callback
         self.active_plans: Dict[str, DynamicTaskPlan] = {}
 
@@ -275,6 +284,7 @@ class DynamicTaskPlanner:
 
         executed_steps = []
         last_result = None
+        partial_failures = []
 
         for idx, step in enumerate(plan.steps):
             if plan.cancelled:
@@ -326,20 +336,32 @@ class DynamicTaskPlanner:
                 self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool})
             else:
                 self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "error": tool_res.get("error")})
+                if step.tool in self.NON_FATAL_FAILURE_TOOLS and idx < len(plan.steps) - 1:
+                    partial_failures.append({
+                        "step_id": step.step_id,
+                        "tool": step.tool,
+                        "error": tool_res.get("error", "Step failed")
+                    })
+                    continue
                 plan.state = PlanState.FAILED
                 break
 
-        if plan.state != PlanState.FAILED and plan.state != PlanState.CANCELLED and plan.state != PlanState.WAITING_FOR_PERMISSION:
-            plan.state = PlanState.COMPLETED
+        if plan.state not in {PlanState.FAILED, PlanState.CANCELLED, PlanState.WAITING_FOR_PERMISSION}:
+            plan.state = PlanState.PARTIAL_SUCCESS if partial_failures else PlanState.COMPLETED
             plan.completed_at = time.time()
-            self.emit("task.completed", {"plan_id": plan.plan_id})
+            self.emit("task.completed", {
+                "plan_id": plan.plan_id,
+                "partial": bool(partial_failures),
+                "failures": partial_failures
+            })
             self.emit("maya.state.changed", {"state": "IDLE", "plan_id": plan.plan_id})
 
         return {
             "plan_id": plan.plan_id,
             "state": plan.state.value,
             "steps": executed_steps,
-            "last_result": last_result
+            "last_result": last_result,
+            "partial_failures": partial_failures
         }
 
     def resume_plan(self, plan_id: str, confirmation_id: str, permission_token: str) -> Dict[str, Any]:
@@ -666,11 +688,23 @@ class DynamicTaskPlanner:
 
         # Vision tools
         elif tool_name == "capture_screen":
-            result = self.vision.capture_screen(return_base64=arguments.get("return_base64", False))
+            if self.unified_context is not None:
+                result = self.unified_context.capture_screen(
+                    label=arguments.get("label"),
+                    save=bool(arguments.get("save", False))
+                )
+            else:
+                result = self.vision.capture_screen(return_base64=arguments.get("return_base64", False))
             summary = "Captured desktop display"
 
         elif tool_name == "analyze_screen":
             result = self.vision.analyze_screen()
+            if self.unified_context is not None and result.get("screenshot_path"):
+                self.unified_context.remember_entity(
+                    "screen_analysis",
+                    result,
+                    label="latest screen analysis"
+                )
             summary = f"Analyzed screen: active {result.get('active_window')}"
 
         # Browser tools
@@ -735,6 +769,31 @@ class DynamicTaskPlanner:
 
         else:
             result = {"success": False, "error": f"Unknown tool: {tool_name}"}
+
+        # Feed verified intermediate results back into the unified session context.
+        if self.unified_context is not None:
+            try:
+                self.unified_context.remember_entity(
+                    "tool_result",
+                    {
+                        "tool": tool_name,
+                        "arguments": arguments,
+                        "result": result,
+                        "verified": result.get("verified", result.get("success", False)),
+                    },
+                    label=f"last {tool_name} result"
+                )
+                for key in ("filepath", "path", "saved_path"):
+                    candidate = result.get(key)
+                    if candidate:
+                        self.unified_context.remember_entity(
+                            "file",
+                            candidate,
+                            label="latest file"
+                        )
+                        break
+            except Exception:
+                pass
 
         # Action Ledger Recording
         action_id = str(uuid.uuid4())[:8]
