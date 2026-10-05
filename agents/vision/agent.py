@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from PIL import ImageGrab
-from maya_core.config import SCREENSHOTS_DIR
+from maya_core.config import SCREENSHOTS_DIR, get_user_screenshots_dir
 from agents.vision.ocr import windows_ocr
 
 try:
@@ -28,7 +28,7 @@ except ImportError:
 
 class VisionAgent:
     def __init__(self, output_dir: Optional[Path] = None):
-        self.output_dir = output_dir or SCREENSHOTS_DIR
+        self.output_dir = output_dir or get_user_screenshots_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def check_privacy_permission(self) -> bool:
@@ -38,7 +38,7 @@ class VisionAgent:
         return privacy != "Never"
 
     def capture_screen(self, return_base64: bool = False) -> Dict[str, Any]:
-        """Captures primary display screen and records file metadata with privacy policy enforcement."""
+        """Capture the full Windows desktop and save a lossless PNG in the user's Screenshots folder."""
         if not self.check_privacy_permission():
             return {
                 "success": False,
@@ -48,7 +48,8 @@ class VisionAgent:
         try:
             screenshot = None
             try:
-                screenshot = ImageGrab.grab()
+                # Win+PrintScreen-style full desktop capture, including all monitors.
+                screenshot = ImageGrab.grab(all_screens=True)
             except Exception as grab_err:
                 return {
                     "success": False,
@@ -61,9 +62,12 @@ class VisionAgent:
                     "error": "Failed to capture desktop display: No active display surface detected."
                 }
 
-            timestamp = int(time.time())
-            filename = f"maya_screen_{timestamp}.png"
+            timestamp = time.time()
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(timestamp))
+            millis = int((timestamp % 1) * 1000)
+            filename = f"Screenshot_{stamp}_{millis:03d}.png"
             filepath = self.output_dir / filename
+            # PNG is lossless: no JPEG compression or quality reduction.
             screenshot.save(str(filepath), "PNG")
 
             # Calculate real image brightness & contrast
