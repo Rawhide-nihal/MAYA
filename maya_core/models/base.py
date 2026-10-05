@@ -226,7 +226,7 @@ class DeterministicIntentClassifier:
             }
 
         sync_contacts = re.match(
-            r"^(?:sync|refresh|update|load)\s+(?:my\s+)?(whatsapp|telegram)\s+(?:contacts|contact\s+list|chats|contacts\s+and\s+chats)$",
+            r"^(?:sync|refresh|update|load)\s+(?:my\s+)?(whatsapp)\s+(?:contacts|contact\s+list|chats|contacts\s+and\s+chats)$",
             cleaned,
             flags=re.IGNORECASE
         )
