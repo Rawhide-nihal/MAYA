@@ -4,6 +4,8 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import mimetypes
+import os
 from collections import deque
 from typing import Any, Deque, Dict, Optional
 
@@ -95,8 +97,38 @@ class CommunicationBridge:
                     continue
                 command["status"] = "dispatched"
                 command["dispatched_at"] = time.time()
-                return dict(command)
+
+                # Never reveal an arbitrary local filesystem path to page content.
+                public_command = dict(command)
+                attachment_path = public_command.pop("attachment_path", None)
+                if attachment_path:
+                    public_command["has_attachment"] = True
+                    public_command["attachment_name"] = os.path.basename(attachment_path)
+                    public_command["attachment_size"] = os.path.getsize(attachment_path)
+                    public_command["attachment_mime"] = (
+                        mimetypes.guess_type(attachment_path)[0]
+                        or "application/octet-stream"
+                    )
+                else:
+                    public_command["has_attachment"] = False
+                return public_command
         return None
+
+    def get_attachment(self, command_id: str) -> Optional[Dict[str, Any]]:
+        """Return the attachment bound to an exact dispatched communication command."""
+        with self._lock:
+            command = self._commands.get(command_id)
+            if not command or command.get("status") != "dispatched":
+                return None
+            path = command.get("attachment_path")
+            if not path or not os.path.isfile(path):
+                return None
+            return {
+                "path": path,
+                "name": os.path.basename(path),
+                "mime_type": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                "size_bytes": os.path.getsize(path),
+            }
 
     def complete(self, command_id: str, result: Dict[str, Any]) -> bool:
         with self._lock:
