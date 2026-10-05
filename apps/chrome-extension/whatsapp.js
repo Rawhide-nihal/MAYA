@@ -14,6 +14,8 @@
       }) || null;
   }
 
+  let lastSidebarContactSignature = '';
+
   const CONTACT_UI_TITLES = new Set([
     'new chat', 'search', 'archived', 'communities', 'status', 'channels',
     'settings', 'profile', 'new group', 'contacts', 'frequently contacted'
@@ -50,7 +52,11 @@
   function reportVisibleSidebarContacts() {
     const pane = document.querySelector('#pane-side');
     if (!pane) return;
-    reportContacts(collectVisibleContactNames(pane), 'whatsapp_sidebar');
+    const contacts = collectVisibleContactNames(pane).sort((a, b) => a.localeCompare(b));
+    const signature = contacts.join('\u0000');
+    if (!contacts.length || signature === lastSidebarContactSignature) return;
+    lastSidebarContactSignature = signature;
+    reportContacts(contacts, 'whatsapp_sidebar');
   }
 
   function findNewChatButton() {
