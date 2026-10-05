@@ -35,6 +35,7 @@ from agents.communication.agent import CommunicationAgent
 from maya_core.personality.engine import PersonalityEngine, MayaMode, ResponseDepth
 from maya_core.context.engine import UnifiedContextEngine
 from maya_core.attachments.intelligence import AttachmentIntelligence
+from maya_core.config import settings, get_user_screenshots_dir
 
 class TestMayaPhase2Core(unittest.TestCase):
     def setUp(self):
@@ -160,6 +161,14 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r10["arguments"]["recipient"], "current chat")
         self.assertEqual(r10["arguments"]["attachment_path"].lower(), "that")
         self.assertEqual(r10["arguments"]["message"], "")
+
+        r11 = self.classifier.classify_and_extract(
+            "Send the screenshot to this guy in whatsapp"
+        )
+        self.assertEqual(r11["tool"], "send_communication")
+        self.assertEqual(r11["arguments"]["service"], "whatsapp")
+        self.assertEqual(r11["arguments"]["recipient"], "current chat")
+        self.assertEqual(r11["arguments"]["attachment_path"].lower(), "the screenshot")
 
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
@@ -497,6 +506,51 @@ class TestMayaPhase2Core(unittest.TestCase):
             fake_bridge.command["attachment_path"],
             str(attachment.resolve())
         )
+
+    def test_chrome_configured_profile_beats_last_used_and_default_alias(self):
+        original_profile = settings.get("chrome_main_profile", "")
+        original_account = settings.get("chrome_main_account", "")
+        try:
+            settings.set("chrome_main_profile", "Profile 7")
+            settings.set("chrome_main_account", "")
+
+            agent = WindowsAgent()
+            agent._load_chrome_profile_state = lambda: {
+                "profile": {
+                    "last_used": "Profile 2",
+                    "info_cache": {
+                        "Profile 2": {"name": "Wrong Last Used", "user_name": "other@example.com"},
+                        "Profile 7": {"name": "Boss Main", "user_name": "boss@example.com"},
+                        "Default": {"name": "Default"}
+                    }
+                }
+            }
+
+            main_result = agent.resolve_chrome_profile("main")
+            self.assertTrue(main_result["success"])
+            self.assertEqual(main_result["profile_directory"], "Profile 7")
+            self.assertEqual(main_result["resolution"], "configured_main_profile")
+
+            default_result = agent.resolve_chrome_profile("default")
+            self.assertTrue(default_result["success"])
+            self.assertEqual(default_result["profile_directory"], "Profile 7")
+        finally:
+            settings.set("chrome_main_profile", original_profile)
+            settings.set("chrome_main_account", original_account)
+
+    def test_user_screenshot_directory_override_is_visible_folder(self):
+        original = os.environ.get("MAYA_SCREENSHOT_DIR")
+        target = Path(self.temp_dir.name) / "Pictures" / "Screenshots"
+        try:
+            os.environ["MAYA_SCREENSHOT_DIR"] = str(target)
+            resolved = get_user_screenshots_dir()
+            self.assertEqual(resolved.resolve(), target.resolve())
+            self.assertTrue(resolved.exists())
+        finally:
+            if original is None:
+                os.environ.pop("MAYA_SCREENSHOT_DIR", None)
+            else:
+                os.environ["MAYA_SCREENSHOT_DIR"] = original
 
     def test_v5_personality_modes_and_adaptive_depth(self):
         from maya_core.config import settings
