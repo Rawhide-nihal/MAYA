@@ -250,7 +250,7 @@ class WindowsAgent:
             # Fallback to shell start-process
             cmd = ["powershell", "-NoProfile", "-Command", f"Start-Process '{app_name}'"]
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(1.2)
                 verified = self.is_application_running(app_name)
                 return {
