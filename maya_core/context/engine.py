@@ -20,11 +20,12 @@ from maya_core.config import CACHE_DIR, SCREENSHOTS_DIR, settings
 
 
 class UnifiedContextEngine:
-    def __init__(self, windows, vision, memory=None, ledger=None):
+    def __init__(self, windows, vision, memory=None, ledger=None, browser_context_source=None):
         self.windows = windows
         self.vision = vision
         self.memory = memory
         self.ledger = ledger
+        self.browser_context_source = browser_context_source
         self.session_id = uuid.uuid4().hex[:12]
         self.session_dir = CACHE_DIR / "sessions" / self.session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +114,15 @@ class UnifiedContextEngine:
             except Exception:
                 recent_actions = []
 
+        browser_context = {}
+        if self.browser_context_source is not None:
+            try:
+                getter = getattr(self.browser_context_source, "get_browser_context", None)
+                if callable(getter):
+                    browser_context = getter() or {}
+            except Exception:
+                browser_context = {}
+
         snapshot: Dict[str, Any] = {
             "timestamp": time.time(),
             "session_id": self.session_id,
@@ -122,6 +132,7 @@ class UnifiedContextEngine:
             "recent_files": self._recent_files() if settings.get("context_recent_files_enabled", True) else [],
             "recent_actions": recent_actions,
             "battery": battery,
+            "browser_context": browser_context,
             "latest_screenshot": self.screenshots[-1] if self.screenshots else None,
             "previous_screenshot": self.screenshots[-2] if len(self.screenshots) > 1 else None,
             "latest_attachment": self.attachments[-1] if self.attachments else None,
@@ -329,6 +340,13 @@ class UnifiedContextEngine:
         recent_files = snapshot.get("recent_files") or []
         if recent_files:
             parts.append("- Recent files: " + "; ".join(item["name"] for item in recent_files[:5]))
+
+        browser_context = snapshot.get("browser_context") or {}
+        if browser_context.get("title") or browser_context.get("url"):
+            parts.append(
+                f"- Active browser tab: {browser_context.get('title') or 'Untitled'} "
+                f"({browser_context.get('url') or 'URL unavailable'})"
+            )
 
         battery = snapshot.get("battery")
         if battery:
