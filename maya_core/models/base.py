@@ -380,12 +380,17 @@ class DeterministicIntentClassifier:
         if copy_to_clipboard:
             target = copy_to_clipboard.group(1).strip()
             target_lower = target.lower()
+            path_like = bool(
+                re.search(r"^[a-zA-Z]:[\\/]", target)
+                or re.search(r"\.[a-zA-Z0-9]{1,10}$", target.strip('"'))
+            )
             if (
                 any(word in target_lower for word in [
                     "screenshot", "screen shot", "png", "jpg", "jpeg",
                     "image", "picture", "photo", "file", "document", "attachment"
                 ])
                 or target_lower in {"this", "that", "it", "latest", "previous"}
+                or path_like
             ):
                 return {
                     "intent": "PC_ACTION",
@@ -419,7 +424,11 @@ class DeterministicIntentClassifier:
                 "this screenshot", "that screenshot", "the screenshot",
                 "latest screenshot", "previous screenshot"
             }
-            if (has_recent_reference and has_file_kind) or session_reference:
+            path_like = bool(
+                re.search(r"^[a-zA-Z]:[\\/]", target)
+                or re.search(r"\.[a-zA-Z0-9]{1,10}$", target.strip('"'))
+            )
+            if (has_recent_reference and has_file_kind) or session_reference or path_like:
                 return {
                     "intent": "PC_ACTION",
                     "tool": "open_file",
