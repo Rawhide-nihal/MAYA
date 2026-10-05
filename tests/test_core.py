@@ -30,6 +30,7 @@ from agents.diagnostics.engine import DiagnosticEngine
 from agents.terminal.agent import TerminalAgent
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
 
 class TestMayaPhase2Core(unittest.TestCase):
     def setUp(self):
@@ -109,12 +110,55 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r4["intent"], "DEVELOPMENT_ACTION")
         self.assertEqual(r4["tool"], "inspect_project")
 
+        # External communication
+        r5 = self.classifier.classify_and_extract(
+            "Send a WhatsApp message to Rahul: I'll be there at 6"
+        )
+        self.assertEqual(r5["intent"], "PC_ACTION")
+        self.assertEqual(r5["tool"], "send_communication")
+        self.assertEqual(r5["arguments"]["service"], "whatsapp")
+        self.assertEqual(r5["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r5["arguments"]["message"], "I'll be there at 6")
+
+        r6 = self.classifier.classify_and_extract("Open WhatsApp in Chrome")
+        self.assertEqual(r6["tool"], "open_application")
+        self.assertEqual(r6["arguments"]["application"], "Google Chrome")
+        self.assertEqual(r6["arguments"]["profile"], "main")
+        self.assertIn("web.whatsapp.com", r6["arguments"]["path"])
+
+        r7 = self.classifier.classify_and_extract(
+            "Send Rahul a WhatsApp message saying I fixed it"
+        )
+        self.assertEqual(r7["tool"], "send_communication")
+        self.assertEqual(r7["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r7["arguments"]["message"], "I fixed it")
+
+        r8 = self.classifier.classify_and_extract(
+            "Draft an email to friend@example.com saying Project is ready"
+        )
+        self.assertEqual(r8["tool"], "prepare_communication")
+        self.assertEqual(r8["arguments"]["service"], "gmail")
+        self.assertEqual(r8["arguments"]["recipient"], "friend@example.com")
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
         p_read = self.permissions.check_permission("get_system_status", {})
         self.assertTrue(p_read.granted)
         self.assertFalse(p_read.requires_confirmation)
+
+        # Sending external communication is Level 3 and requires confirmation
+        # under MAYA's default Level 2 permission policy.
+        send_args = {
+            "service": "whatsapp",
+            "recipient": "Rahul",
+            "message": "I'll be there at 6",
+            "profile": "main"
+        }
+        p_send = self.permissions.check_permission("send_communication", send_args)
+        self.assertFalse(p_send.granted)
+        self.assertTrue(p_send.requires_confirmation)
+        self.assertEqual(p_send.required_level, PermissionLevel.LEVEL_3_MODIFICATION)
 
         # Level 4 critical action must require confirmation
         p_crit = self.permissions.check_permission("delete_file", {"filepath": "important.txt"})
@@ -355,6 +399,8 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertIsNotNone(default_tool_registry.get("get_system_status"))
         self.assertIsNotNone(default_tool_registry.get("search_files"))
         self.assertIsNotNone(default_tool_registry.get("rollback_last_action"))
+        self.assertIsNotNone(default_tool_registry.get("prepare_communication"))
+        self.assertIsNotNone(default_tool_registry.get("send_communication"))
 
         # Verify argument validation
         valid, err = default_tool_registry.validate_call("open_application", {"application": "VS Code"})
@@ -365,6 +411,56 @@ class TestMayaPhase2Core(unittest.TestCase):
         invalid, err = default_tool_registry.validate_call("open_application", {})
         self.assertFalse(invalid)
         self.assertIn("Missing required parameter", err)
+
+    def test_communication_agent_preserves_exact_payload(self):
+        class FakeWindows:
+            def __init__(self):
+                self.calls = []
+
+            def launch_application(self, app_name, arguments=None, cwd=None, profile=None):
+                self.calls.append({
+                    "app_name": app_name,
+                    "arguments": arguments,
+                    "profile": profile
+                })
+                return {
+                    "success": True,
+                    "verified": True,
+                    "profile_name": "Main",
+                    "profile_directory": "Default"
+                }
+
+        class FakeBridge:
+            def __init__(self):
+                self.command = None
+
+            def submit(self, command, timeout=25.0):
+                self.command = dict(command)
+                return {
+                    "success": True,
+                    "verified": True,
+                    "sent": True
+                }
+
+        fake_windows = FakeWindows()
+        fake_bridge = FakeBridge()
+        agent = CommunicationAgent(windows=fake_windows, bridge=fake_bridge)
+
+        result = agent.send(
+            service="whatsapp",
+            recipient="Rahul",
+            message="I'll be there at 6",
+            profile="main"
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["verified"])
+        self.assertEqual(fake_bridge.command["service"], "whatsapp")
+        self.assertEqual(fake_bridge.command["recipient"], "Rahul")
+        self.assertEqual(fake_bridge.command["message"], "I'll be there at 6")
+        self.assertEqual(fake_bridge.command["action"], "send")
+        self.assertEqual(fake_windows.calls[0]["app_name"], "Google Chrome")
+        self.assertEqual(fake_windows.calls[0]["profile"], "main")
 
     # 13. Phase 4: Neural Decision Extraction & Schema Validation
     def test_neural_decision_parser(self):

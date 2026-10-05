@@ -19,6 +19,7 @@ from agents.developer.agent import DeveloperAgent
 from agents.diagnostics.engine import DiagnosticEngine
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
 
 class PlanState(str, Enum):
     CREATED = "CREATED"
@@ -78,6 +79,7 @@ class DynamicTaskPlanner:
         diagnostics: DiagnosticEngine,
         vision: VisionAgent,
         browser: Optional[BrowserAgent] = None,
+        communication: Optional[CommunicationAgent] = None,
         event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
     ):
         self.permissions = permissions
@@ -90,6 +92,7 @@ class DynamicTaskPlanner:
         self.diagnostics = diagnostics
         self.vision = vision
         self.browser = browser or BrowserAgent()
+        self.communication = communication or CommunicationAgent(windows=windows)
         self.event_callback = event_callback
         self.active_plans: Dict[str, DynamicTaskPlan] = {}
 
@@ -140,12 +143,17 @@ class DynamicTaskPlanner:
 
         elif tool == "open_application":
             app = args.get("application", "Visual Studio Code")
+            launch_arguments = {"application": app}
+            if args.get("profile"):
+                launch_arguments["profile"] = args.get("profile")
+            if args.get("path"):
+                launch_arguments["path"] = args.get("path")
             steps.append(DynamicPlanStep(
                 step_id=1,
                 name=f"Launch {app}",
                 description=f"Execute {app} binary and verify process",
                 tool="open_application",
-                arguments={"application": app}
+                arguments=launch_arguments
             ))
             steps.append(DynamicPlanStep(
                 step_id=2,
@@ -464,7 +472,12 @@ class DynamicTaskPlanner:
         # Windows Agent tools
         if tool_name == "open_application":
             app = arguments.get("application", "Visual Studio Code")
-            result = self.windows.launch_application(app)
+            launch_args = [arguments.get("path")] if arguments.get("path") else None
+            result = self.windows.launch_application(
+                app,
+                arguments=launch_args,
+                profile=arguments.get("profile")
+            )
             affected_resources.append(app)
             summary = f"Opened {app}"
             undo_available = False
@@ -668,6 +681,29 @@ class DynamicTaskPlanner:
         elif tool_name == "search_web":
             result = self.browser.search_web(arguments.get("query", ""))
             summary = f"Web search for '{arguments.get('query')}'"
+
+        # Authenticated communication tools
+        elif tool_name == "prepare_communication":
+            result = self.communication.prepare(
+                service=arguments.get("service", ""),
+                recipient=arguments.get("recipient", ""),
+                message=arguments.get("message", ""),
+                subject=arguments.get("subject"),
+                profile=arguments.get("profile", "main"),
+                attachment_path=arguments.get("attachment_path"),
+            )
+            summary = f"Prepared {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
+
+        elif tool_name == "send_communication":
+            result = self.communication.send(
+                service=arguments.get("service", ""),
+                recipient=arguments.get("recipient", ""),
+                message=arguments.get("message", ""),
+                subject=arguments.get("subject"),
+                profile=arguments.get("profile", "main"),
+                attachment_path=arguments.get("attachment_path"),
+            )
+            summary = f"Sent {arguments.get('service', 'message')} communication to {arguments.get('recipient', '')}"
 
         # Memory & Ledger
         elif tool_name == "search_memory":

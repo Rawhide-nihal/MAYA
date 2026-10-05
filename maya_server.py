@@ -14,7 +14,7 @@ import hmac
 import base64
 from urllib.parse import urlparse
 from pathlib import Path
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, stream_with_context
 
 # Add repository root to Python path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,6 +32,8 @@ from agents.developer.agent import DeveloperAgent
 from agents.diagnostics.engine import DiagnosticEngine
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
+from agents.communication.bridge import communication_bridge
 from maya_core.context.builder import ContextBuilder
 from maya_core.planner.dynamic_planner import DynamicTaskPlanner
 from maya_core.brain.brain import MayaBrain
@@ -72,10 +74,11 @@ developer = DeveloperAgent(terminal)
 diagnostics = DiagnosticEngine(terminal)
 vision = VisionAgent()
 browser = BrowserAgent()
+communication = CommunicationAgent(windows=windows, bridge=communication_bridge)
 
 planner = DynamicTaskPlanner(
     permissions, ledger, memory, windows, terminal, filesystem,
-    developer, diagnostics, vision, browser, event_callback=dispatch_event
+    developer, diagnostics, vision, browser, communication=communication, event_callback=dispatch_event
 )
 
 voice = VoiceEngine(event_emitter=dispatch_event)
@@ -90,6 +93,7 @@ ALLOWED_EXACT_ORIGINS = {
     "http://localhost:5173",
     "vscode-webview://",
     "app://maya",
+    "chrome-extension://cbffklcgjeagclgldpkiflcbgbmjgohh",
     "null"
 }
 
@@ -165,7 +169,7 @@ def get_status():
     return jsonify({
         "status": "online",
         "maya_core": "Active",
-        "local_ai_ready": True,
+        "local_ai_ready": model_info.get("lifecycle_state") == "READY",
         "offline_only": settings.get("offline_only", True),
         "metrics": summary,
         "model": model_info,
@@ -185,9 +189,64 @@ def handle_chat():
 
     # If voice is enabled and conversational, synthesize speech asynchronously
     if settings.get("voice_enabled") and not result.get("requires_confirmation"):
-        voice.speak(result.get("reply", ""))
+        threading.Thread(
+            target=voice.speak,
+            args=(result.get("reply", ""),),
+            daemon=True,
+        ).start()
 
     return jsonify(result)
+
+# 3b. Streaming Chat Pipeline
+@app.route("/api/chat/stream", methods=["POST"])
+def handle_chat_stream():
+    """Stream ordinary chat as NDJSON; keep tool requests on the validated planner path."""
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "").strip()
+    token = data.get("permission_token")
+    if not message:
+        return jsonify({"error": "No message provided"}), 400
+
+    @stream_with_context
+    def generate_events():
+        final_result = None
+        try:
+            if brain.is_fast_conversation(message):
+                for event in brain.stream_conversation(message):
+                    if event.get("type") == "done":
+                        final_result = event.get("result")
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            else:
+                final_result = brain.process_request(message, permission_token=token)
+                yield json.dumps(
+                    {"type": "done", "result": final_result},
+                    ensure_ascii=False
+                ) + "\n"
+
+            if (
+                settings.get("voice_enabled")
+                and final_result
+                and not final_result.get("requires_confirmation")
+                and final_result.get("reply")
+            ):
+                threading.Thread(
+                    target=voice.speak,
+                    args=(final_result.get("reply", ""),),
+                    daemon=True,
+                ).start()
+        except GeneratorExit:
+            return
+        except Exception as e:
+            print(f"[MAYA Server] Streaming chat error: {e}")
+            yield json.dumps(
+                {"type": "error", "error": str(e)},
+                ensure_ascii=False
+            ) + "\n"
+
+    response = Response(generate_events(), mimetype="application/x-ndjson")
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 # 4. Auth Bootstrap Endpoint
 @app.route("/api/auth/token", methods=["GET"])
@@ -251,13 +310,48 @@ def voice_ptt():
     if not audio_b64:
         return jsonify({"success": False, "error": "Missing audio_base64"}), 400
     try:
-        pcm_bytes = base64.b64decode(audio_b64)
-        amp = calculate_pcm_rms(pcm_bytes[:2048])
+        wav_bytes = base64.b64decode(audio_b64)
+        # Frontend sends a genuine 16-bit PCM WAV. Skip the 44-byte header
+        # when calculating visual amplitude.
+        pcm_preview = wav_bytes[44:2092] if wav_bytes[:4] == b"RIFF" else b""
+        amp = calculate_pcm_rms(pcm_preview)
         dispatch_event(VOICE_LISTENING_AMPLITUDE, {"amplitude": amp})
-        res = voice.process_ptt_audio(pcm_bytes)
+        res = voice.process_ptt_audio(wav_bytes)
         return jsonify(res)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+# MAYA Browser Bridge: authenticated extension command exchange
+@app.route("/api/communication/next", methods=["GET"])
+def communication_next():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "").strip().lower()
+    command = communication_bridge.next_command(service)
+    return jsonify({"command": command})
+
+
+@app.route("/api/communication/result", methods=["POST"])
+def communication_result():
+    data = request.get_json(silent=True) or {}
+    command_id = str(data.get("command_id", "")).strip()
+    result = data.get("result")
+    if not command_id or not isinstance(result, dict):
+        return jsonify({"success": False, "error": "command_id and result are required"}), 400
+
+    accepted = communication_bridge.complete(command_id, result)
+    return jsonify({"success": accepted})
+
+
+@app.route("/api/communication/status", methods=["GET"])
+def communication_status():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(communication_bridge.status())
+
 
 # 9. Action Ledger Activity
 @app.route("/api/activity", methods=["GET"])
@@ -323,6 +417,9 @@ def get_hw():
 
 def start_server(host="127.0.0.1", port=5000):
     print(f"Starting MAYA Core Server V2 on http://{host}:{port} ...")
+    # Warm the local model before the first real conversation. The server
+    # remains available while loading; /api/status reports readiness truthfully.
+    threading.Thread(target=model_runtime.manager.warm_up, daemon=True).start()
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":

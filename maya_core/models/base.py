@@ -127,25 +127,195 @@ class DeterministicIntentClassifier:
                 "summary": "Undo last reversible action"
             }
 
+        # Authenticated communication fallback.
+        # Conservative parsing keeps ambiguous recipients from being sent accidentally.
+        email_subject = re.match(
+            r"^(?:send\s+(?:an?\s+)?email\s+to|email|mail)\s+([^\s,]+@[^\s,]+)\s+subject\s+(.+?)\s+(?:body|message)\s+(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if email_subject:
+            recipient, subject, message = (
+                email_subject.group(1).strip(),
+                email_subject.group(2).strip(),
+                email_subject.group(3).strip(),
+            )
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": "gmail",
+                    "recipient": recipient,
+                    "subject": subject,
+                    "message": message,
+                    "profile": "main"
+                },
+                "confidence": 0.99,
+                "summary": f"Send Gmail message to {recipient}"
+            }
+
+        email_patterns = [
+            (
+                "send_communication",
+                r"^(?:send\s+(?:an?\s+)?email\s+to|email|mail)\s+(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "prepare_communication",
+                r"^(?:draft|prepare|compose)\s+(?:an?\s+)?email\s+(?:to\s+)?(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+        ]
+        for tool_name, pattern in email_patterns:
+            m = re.match(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
+            if m:
+                recipient = m.group(1).strip()
+                message = m.group(2).strip()
+                verb = "Send" if tool_name == "send_communication" else "Prepare"
+                return {
+                    "intent": "PC_ACTION",
+                    "tool": tool_name,
+                    "arguments": {
+                        "service": "gmail",
+                        "recipient": recipient,
+                        "message": message,
+                        "profile": "main"
+                    },
+                    "confidence": 0.97,
+                    "summary": f"{verb} Gmail message for {recipient}"
+                }
+
+        messaging_patterns = [
+            (
+                "send_communication",
+                "service_first",
+                r"^(?:send\s+(?:a\s+)?(whatsapp|telegram)(?:\s+message)?\s+to)\s+(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "send_communication",
+                "recipient_first",
+                r"^send\s+(.+?)\s+(?:a\s+)?(whatsapp|telegram)(?:\s+message)?\s+(?:saying|that)\s+(.+)$"
+            ),
+            (
+                "send_communication",
+                "recipient_first",
+                r"^(?:message|msg|text)\s+(.+?)\s+on\s+(whatsapp|telegram)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "send_communication",
+                "service_first",
+                r"^(whatsapp|telegram)\s+(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "prepare_communication",
+                "service_first",
+                r"^(?:draft|prepare|compose)\s+(?:a\s+)?(whatsapp|telegram)(?:\s+message)?\s+(?:to\s+)?(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+        ]
+        for tool_name, order, pattern in messaging_patterns:
+            m = re.match(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
+            if not m:
+                continue
+
+            if order == "service_first":
+                service, recipient, message = m.group(1), m.group(2), m.group(3)
+            else:
+                recipient, service, message = m.group(1), m.group(2), m.group(3)
+
+            verb = "Send" if tool_name == "send_communication" else "Prepare"
+            return {
+                "intent": "PC_ACTION",
+                "tool": tool_name,
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": recipient.strip(),
+                    "message": message.strip(),
+                    "profile": "main"
+                },
+                "confidence": 0.97,
+                "summary": f"{verb} {service} message for {recipient.strip()}"
+            }
+
+        # Open authenticated communication services in the user's main Chrome profile.
+        service_open = re.search(
+            r"\b(?:open|launch|start)\s+(?:my\s+)?(gmail|whatsapp|telegram)(?:\s+(?:in|on|from)\s+(?:google\s+)?chrome)?\b",
+            lower
+        )
+        if service_open:
+            service = service_open.group(1)
+            urls = {
+                "gmail": "https://mail.google.com/mail/",
+                "whatsapp": "https://web.whatsapp.com/",
+                "telegram": "https://web.telegram.org/k/"
+            }
+            return {
+                "intent": "PC_ACTION",
+                "tool": "open_application",
+                "arguments": {
+                    "application": "Google Chrome",
+                    "profile": "main",
+                    "path": urls[service]
+                },
+                "confidence": 0.98,
+                "summary": f"Open {service.title()} in the main Chrome profile"
+            }
+
         # Check for open application (VS Code, Notepad, Chrome, Explorer, Terminal, etc.)
         match_app = re.search(r"\b(?:open|launch|start|run)\s+(?:application\s+|app\s+)?([a-zA-Z0-9\s\.\-_]+?)(?:\s+and\s+|\s*$|\.|\?)", lower)
         if match_app:
             app_raw = match_app.group(1).strip()
             # Distinguish app from file or command
             if any(term in app_raw for term in ["vs code", "vscode", "code", "notepad", "chrome", "firefox", "edge", "terminal", "powershell", "cmd", "explorer"]):
-                app_name = "Visual Studio Code" if "code" in app_raw else app_raw.title()
-                
+                if "chrome" in app_raw:
+                    app_name = "Google Chrome"
+                elif "firefox" in app_raw:
+                    app_name = "Firefox"
+                elif "edge" in app_raw:
+                    app_name = "Microsoft Edge"
+                elif "notepad" in app_raw:
+                    app_name = "Notepad"
+                elif any(term in app_raw for term in ["vs code", "vscode", "code"]):
+                    app_name = "Visual Studio Code"
+                elif "powershell" in app_raw:
+                    app_name = "PowerShell"
+                elif "cmd" in app_raw:
+                    app_name = "Command Prompt"
+                elif "terminal" in app_raw:
+                    app_name = "Windows Terminal"
+                elif "explorer" in app_raw:
+                    app_name = "Explorer"
+                else:
+                    app_name = app_raw.title()
+
+                profile_hint = None
+                if "chrome" in app_raw:
+                    email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", cleaned)
+                    if email_match:
+                        profile_hint = email_match.group(0)
+                    elif any(
+                        phrase in lower
+                        for phrase in [
+                            "main account", "main profile",
+                            "primary account", "primary profile",
+                            "default account", "my main account"
+                        ]
+                    ):
+                        profile_hint = "main"
+
                 # Check if user also asked to check project or scan errors
                 check_proj = "check" in lower or "scan" in lower or "error" in lower or "project" in lower
+                arguments = {"application": app_name}
+                if profile_hint:
+                    arguments["profile"] = profile_hint
+
                 return {
                     "intent": "DEVELOPMENT_ACTION" if check_proj else "PC_ACTION",
                     "tool": "open_application_and_inspect" if check_proj else "open_application",
-                    "arguments": {
-                        "application": app_name,
-                        "inspect_project": check_proj
-                    },
+                    "arguments": arguments,
                     "confidence": 0.95,
-                    "summary": f"Open {app_name}" + (" and scan project for errors" if check_proj else "")
+                    "summary": (
+                        f"Open {app_name}"
+                        + (f" using profile '{profile_hint}'" if profile_hint else "")
+                        + (" and scan project for errors" if check_proj else "")
+                    )
                 }
 
         # Check for system diagnostic or scan
