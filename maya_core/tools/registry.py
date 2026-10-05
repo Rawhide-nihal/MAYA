@@ -155,6 +155,7 @@ class ToolRegistry:
         diagnostics=None,
         browser=None,
         vision=None,
+        communication=None,
         memory=None,
         ledger=None
     ) -> None:
@@ -177,6 +178,9 @@ class ToolRegistry:
         if vision is None:
             from agents.vision.agent import VisionAgent
             vision = VisionAgent()
+        if communication is None:
+            from agents.communication.agent import CommunicationAgent
+            communication = CommunicationAgent(windows=windows)
         if memory is None:
             from memory.store import MemoryStore
             memory = MemoryStore()
@@ -214,6 +218,22 @@ class ToolRegistry:
             "analyze_screen": lambda **kw: vision.analyze_screen(),
             "open_url": lambda url, **kw: browser.open_url(url),
             "search_web": lambda query, **kw: browser.search_web(query),
+            "prepare_communication": lambda service, recipient, message, subject=None, profile="main", attachment_path=None, **kw: communication.prepare(
+                service=service,
+                recipient=recipient,
+                message=message,
+                subject=subject,
+                profile=profile,
+                attachment_path=attachment_path
+            ),
+            "send_communication": lambda service, recipient, message, subject=None, profile="main", attachment_path=None, **kw: communication.send(
+                service=service,
+                recipient=recipient,
+                message=message,
+                subject=subject,
+                profile=profile,
+                attachment_path=attachment_path
+            ),
             "start_timer": lambda duration_seconds, label="Timer", **kw: windows.start_timer(duration_seconds, label=label),
             "set_reminder": lambda message, time_expression="now", **kw: windows.set_reminder(message, time_expression=time_expression),
             "store_memory": lambda category, key, value, **kw: {"success": True, "saved": memory.save_semantic_memory(category, key, value), "verified": True},
@@ -475,6 +495,38 @@ def build_default_tool_registry() -> ToolRegistry:
             ToolParameter("query", "string", "Search query", required=True)
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="prepare_communication",
+        description="Prepares but does not send a message or email in the user's authenticated Gmail, WhatsApp, or Telegram web session.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
+            ToolParameter("recipient", "string", "Exact email, phone/contact name, or Telegram username/contact", required=True),
+            ToolParameter("message", "string", "Message body to prepare", required=True),
+            ToolParameter("subject", "string", "Optional Gmail subject", required=False),
+            ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
+            ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="send_communication",
+        description="Sends a message or email from the user's authenticated Gmail, WhatsApp, or Telegram web session after permission approval and verifies the send state.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
+            ToolParameter("recipient", "string", "Exact email, phone/contact name, or Telegram username/contact", required=True),
+            ToolParameter("message", "string", "Message body to send", required=True),
+            ToolParameter("subject", "string", "Optional Gmail subject", required=False),
+            ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
+            ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_3_MODIFICATION,
         undo_available=False
     ))
 
