@@ -356,7 +356,12 @@ def communication_next():
         return jsonify({"error": "Unauthorized"}), 401
 
     service = request.args.get("service", "").strip().lower()
-    command = communication_bridge.next_command(service)
+    raw_tab_id = request.args.get("tab_id", "").strip()
+    try:
+        tab_id = int(raw_tab_id) if raw_tab_id else None
+    except ValueError:
+        tab_id = None
+    command = communication_bridge.next_command(service, tab_id=tab_id)
     return jsonify({"command": command})
 
 
