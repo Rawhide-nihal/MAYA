@@ -801,19 +801,21 @@ class MayaBrain:
         # Ask MAYA model to formulate a natural concise response
         synth_prompt = (
             f"Execution result: {json.dumps(exec_payload, default=str)}\n"
-            f"Synthesize a concise, natural, professional confirmation to the user in 1-2 sentences. "
+            f"Synthesize a natural grounded response at the response depth requested by the personality policy. "
+            f"For simple actions, stay concise; for explicit detailed/deep-analysis requests, explain the verified findings. "
             f"Be factual, direct, and conversational. Do not mention JSON or execution data structures."
         )
 
         try:
+            synth_policy = self.personality.policy(user_query)
             synth_reply = self.runtime.generate(
                 prompt=synth_prompt,
                 system_prompt=(
                     "You are MAYA, reporting verified execution results to your user. "
                     + self.personality.prompt_fragment(user_query)
                 ),
-                max_new_tokens=96,
-                temperature=0.45,
+                max_new_tokens=min(synth_policy.max_new_tokens, 384),
+                temperature=min(synth_policy.temperature, 0.55),
             )
             if synth_reply and synth_reply.strip() and not synth_reply.startswith("{"):
                 return synth_reply.strip()
