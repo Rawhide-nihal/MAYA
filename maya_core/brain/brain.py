@@ -203,7 +203,8 @@ class MayaBrain:
             "save that screenshot", "save this screenshot", "keep that screenshot",
             "keep this screenshot", "compare this with before", "compare with before",
             "compare screenshots", "compare this with the screenshot", "compare screenshot",
-            "look at my screen", "check my screen",
+            "verify the screenshot", "verify this screenshot", "verify that screenshot",
+            "look at my screen", "check my screen", "look at this", "look at that",
             "what's on my screen", "what is on my screen", "what's this error",
             "what is this error", "read this page", "where should i click",
             "what am i doing", "what's open", "what is open"
@@ -285,6 +286,68 @@ class MayaBrain:
                 "timestamp": time.time(),
             }
 
+        if any(p in lower for p in [
+            "verify the screenshot", "verify this screenshot", "verify that screenshot"
+        ]):
+            record = self.unified_context._find_screenshot("latest")
+            if not record:
+                return {
+                    "intent": "VISION_ANALYSIS",
+                    "reply": "I don't have a session screenshot to verify yet, Boss.",
+                    "tasks": [],
+                    "verified": False,
+                    "timestamp": time.time(),
+                }
+
+            ocr = record.get("ocr") or {}
+            errors = record.get("visible_errors") or []
+            payload = {
+                "screenshot_id": record.get("id"),
+                "captured_at": record.get("timestamp"),
+                "active_window": record.get("active_window"),
+                "ocr_text": str(ocr.get("text") or "")[:12000],
+                "visible_errors": errors[:20],
+            }
+            policy = self.personality.policy(cleaned, {"visible_errors": errors})
+            if payload["ocr_text"] or errors:
+                try:
+                    raw = self.runtime.generate(
+                        (
+                            "Verify and summarize this EXACT previously captured screenshot using only "
+                            "the grounded OCR/window/error metadata below. Do not claim the current screen "
+                            "still looks the same.\n" + json.dumps(payload, default=str)
+                        ),
+                        system_prompt=(
+                            "You are MAYA verifying a stored screenshot. "
+                            + self.personality.prompt_fragment(cleaned, {"visible_errors": errors})
+                        ),
+                        max_new_tokens=min(policy.max_new_tokens, 256),
+                        temperature=0.25,
+                        top_p=0.9,
+                    )
+                    reply = self._extract_conversation_text(raw)
+                except Exception:
+                    reply = ""
+            else:
+                reply = ""
+
+            if not reply:
+                title = ((record.get("active_window") or {}).get("title") or "unknown window")
+                reply = (
+                    f"I verified the stored capture from {title}, Boss. "
+                    "It has no readable OCR/error metadata, so I won't invent details beyond the saved image."
+                )
+
+            return {
+                "intent": "VISION_ANALYSIS",
+                "reply": reply,
+                "executed_tool": "verify_screenshot",
+                "details": payload,
+                "tasks": [],
+                "verified": True,
+                "timestamp": time.time(),
+            }
+
         if (
             any(p in lower for p in ["compare this with before", "compare with before", "compare screenshots"])
             or ("compare" in lower and "screenshot" in lower)
@@ -315,9 +378,14 @@ class MayaBrain:
                 "timestamp": time.time(),
             }
 
+        if any(p in lower for p in ["look at this", "look at that"]):
+            current_ref = self.unified_context.resolve_reference("this")
+            if current_ref and current_ref.get("kind") == "attachment":
+                return None
+
         screen_phrases = [
-            "look at my screen", "check my screen", "what's on my screen",
-            "what is on my screen", "what's this error", "what is this error",
+            "look at my screen", "check my screen", "look at this", "look at that",
+            "what's on my screen", "what is on my screen", "what's this error", "what is this error",
             "read this page", "where should i click"
         ]
         if any(p in lower for p in screen_phrases):
