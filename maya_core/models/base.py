@@ -150,10 +150,38 @@ class DeterministicIntentClassifier:
                 "summary": f"Prepare {attachment_ref.strip()} in the current {service} chat"
             }
 
+        # Context-linked file/screenshot send to the conversation currently open
+        # in WhatsApp/Telegram. Phrases like "this guy" are treated as the active
+        # conversation, never as a contact name to guess/search.
+        attachment_current_chat = re.match(
+            r"^(?:send|share)\s+"
+            r"((?:(?:this|that|the|latest|previous)\s+)?(?:screenshot|file|document|attachment))"
+            r"\s+to\s+(?:this\s+(?:guy|person|contact)|him|her|this\s+chat|the\s+current\s+chat|current\s+chat)"
+            r"\s+(?:on|in|via)\s+(whatsapp|telegram)"
+            r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if attachment_current_chat:
+            attachment_ref, service, optional_message = attachment_current_chat.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": "current chat",
+                    "message": (optional_message or "").strip(),
+                    "profile": "main",
+                    "attachment_path": attachment_ref.strip()
+                },
+                "confidence": 0.995,
+                "summary": f"Send {attachment_ref.strip()} to the current {service} conversation"
+            }
+
         # Context-linked file/screenshot communication.
         attachment_chat = re.match(
             r"^(?:send|share)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
-            r"\s+to\s+(.+?)\s+(?:on|via)\s+(whatsapp|telegram)"
+            r"\s+to\s+(.+?)\s+(?:on|in|via)\s+(whatsapp|telegram)"
             r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
             cleaned,
             flags=re.IGNORECASE | re.DOTALL
