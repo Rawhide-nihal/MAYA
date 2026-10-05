@@ -32,6 +32,8 @@ from agents.developer.agent import DeveloperAgent
 from agents.diagnostics.engine import DiagnosticEngine
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
+from agents.communication.bridge import communication_bridge
 from maya_core.context.builder import ContextBuilder
 from maya_core.planner.dynamic_planner import DynamicTaskPlanner
 from maya_core.brain.brain import MayaBrain
@@ -72,10 +74,11 @@ developer = DeveloperAgent(terminal)
 diagnostics = DiagnosticEngine(terminal)
 vision = VisionAgent()
 browser = BrowserAgent()
+communication = CommunicationAgent(windows=windows, bridge=communication_bridge)
 
 planner = DynamicTaskPlanner(
     permissions, ledger, memory, windows, terminal, filesystem,
-    developer, diagnostics, vision, browser, event_callback=dispatch_event
+    developer, diagnostics, vision, browser, communication=communication, event_callback=dispatch_event
 )
 
 voice = VoiceEngine(event_emitter=dispatch_event)
@@ -90,6 +93,7 @@ ALLOWED_EXACT_ORIGINS = {
     "http://localhost:5173",
     "vscode-webview://",
     "app://maya",
+    "chrome-extension://cbffklcgjeagclgldpkiflcbgbmjgohh",
     "null"
 }
 
@@ -316,6 +320,38 @@ def voice_ptt():
         return jsonify(res)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+# MAYA Browser Bridge: authenticated extension command exchange
+@app.route("/api/communication/next", methods=["GET"])
+def communication_next():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "").strip().lower()
+    command = communication_bridge.next_command(service)
+    return jsonify({"command": command})
+
+
+@app.route("/api/communication/result", methods=["POST"])
+def communication_result():
+    data = request.get_json(silent=True) or {}
+    command_id = str(data.get("command_id", "")).strip()
+    result = data.get("result")
+    if not command_id or not isinstance(result, dict):
+        return jsonify({"success": False, "error": "command_id and result are required"}), 400
+
+    accepted = communication_bridge.complete(command_id, result)
+    return jsonify({"success": accepted})
+
+
+@app.route("/api/communication/status", methods=["GET"])
+def communication_status():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(communication_bridge.status())
+
 
 # 9. Action Ledger Activity
 @app.route("/api/activity", methods=["GET"])
