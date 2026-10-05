@@ -14,7 +14,7 @@ import hmac
 import base64
 from urllib.parse import urlparse
 from pathlib import Path
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, stream_with_context
 
 # Add repository root to Python path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -185,9 +185,64 @@ def handle_chat():
 
     # If voice is enabled and conversational, synthesize speech asynchronously
     if settings.get("voice_enabled") and not result.get("requires_confirmation"):
-        voice.speak(result.get("reply", ""))
+        threading.Thread(
+            target=voice.speak,
+            args=(result.get("reply", ""),),
+            daemon=True,
+        ).start()
 
     return jsonify(result)
+
+# 3b. Streaming Chat Pipeline
+@app.route("/api/chat/stream", methods=["POST"])
+def handle_chat_stream():
+    """Stream ordinary chat as NDJSON; keep tool requests on the validated planner path."""
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "").strip()
+    token = data.get("permission_token")
+    if not message:
+        return jsonify({"error": "No message provided"}), 400
+
+    @stream_with_context
+    def generate_events():
+        final_result = None
+        try:
+            if brain.is_fast_conversation(message):
+                for event in brain.stream_conversation(message):
+                    if event.get("type") == "done":
+                        final_result = event.get("result")
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            else:
+                final_result = brain.process_request(message, permission_token=token)
+                yield json.dumps(
+                    {"type": "done", "result": final_result},
+                    ensure_ascii=False
+                ) + "\n"
+
+            if (
+                settings.get("voice_enabled")
+                and final_result
+                and not final_result.get("requires_confirmation")
+                and final_result.get("reply")
+            ):
+                threading.Thread(
+                    target=voice.speak,
+                    args=(final_result.get("reply", ""),),
+                    daemon=True,
+                ).start()
+        except GeneratorExit:
+            return
+        except Exception as e:
+            print(f"[MAYA Server] Streaming chat error: {e}")
+            yield json.dumps(
+                {"type": "error", "error": str(e)},
+                ensure_ascii=False
+            ) + "\n"
+
+    response = Response(generate_events(), mimetype="application/x-ndjson")
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 # 4. Auth Bootstrap Endpoint
 @app.route("/api/auth/token", methods=["GET"])
