@@ -50,7 +50,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     {
       id: 'welcome',
       sender: 'maya',
-      text: "Hello! I'm MAYA, your personal AI desktop companion. I have full local awareness of your PC, active projects, and system health. How can I assist you today?",
+      text: "Hello, Boss. I'm MAYA, your personal AI desktop companion. I can use live local context from your PC, projects, screen and files when those sources are accessible. What are we working on?",
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       waveform: false
     }
@@ -417,13 +417,9 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           };
           setMessages(prev => [...prev, mayaMsg]);
           onActionCompleted?.();
-          setInternalCoreState('SUCCESS');
+          setInternalCoreState('IDLE');
           setInternalStatusText('Verified and complete.');
-          setTimeout(() => {
-            setInternalCoreState('IDLE');
-            setInternalStatusText('Ready for your command.');
-            setIsProcessing(false);
-          }, 2200);
+          setIsProcessing(false);
         } else {
           await handleSend('Proceed with confirmed action', res.permission_token);
         }
