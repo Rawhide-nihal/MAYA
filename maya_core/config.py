@@ -57,7 +57,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "wake_word_enabled": True,
     "proactive_mode": "Normal",      # Quiet, Normal, Proactive
     "telemetry_enabled": False,
-    "theme": "dark-midnight"
+    "theme": "dark-midnight",
+    "chrome_main_account": "",       # Local-only email/profile hint for the user's primary Chrome profile
+    "chrome_main_profile": ""        # Optional local Chrome profile directory/name override
 }
 
 def get_or_create_auth_token() -> str:
