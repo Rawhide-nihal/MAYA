@@ -208,35 +208,26 @@ class UnifiedContextEngine:
         return record
 
     def capture_screen(self, label: Optional[str] = None, save: bool = False) -> Dict[str, Any]:
+        """
+        Capture a real user-visible screenshot.
+
+        Screenshots are now saved permanently in the user's normal Pictures/Screenshots
+        folder on capture, matching the user's Win+PrintScreen expectation. MAYA keeps
+        only metadata/references in the transient session context.
+        """
         cap = self.vision.capture_screen(return_base64=False)
         if not cap.get("success"):
             return cap
 
-        source = Path(cap["filepath"])
-        session_path = self.session_dir / source.name
-        try:
-            if source.resolve() != session_path.resolve():
-                shutil.copy2(source, session_path)
-                # capture_screen historically writes to the permanent screenshot
-                # directory. Context captures are temporary by default, so remove
-                # that transient source after safely copying it into this session.
-                try:
-                    if source.parent.resolve() == SCREENSHOTS_DIR.resolve():
-                        source.unlink()
-                except Exception:
-                    pass
-            else:
-                session_path = source
-        except Exception:
-            session_path = source
+        screenshot_path = Path(cap["filepath"])
 
         windows = self.vision.detect_windows()
         active = next((w for w in windows if w.get("is_active")), None)
-        errors = self.vision.extract_visible_errors(str(session_path))
+        errors = self.vision.extract_visible_errors(str(screenshot_path))
 
         ocr = {"success": False, "available": False, "text": "", "lines": []}
         try:
-            ocr = windows_ocr.recognize_file(str(session_path))
+            ocr = windows_ocr.recognize_file(str(screenshot_path))
         except Exception:
             pass
 
@@ -259,8 +250,9 @@ class UnifiedContextEngine:
         record = {
             "id": uuid.uuid4().hex[:12],
             "kind": "screenshot",
-            "filepath": str(session_path),
-            "original_filepath": str(source),
+            "filepath": str(screenshot_path),
+            "original_filepath": str(screenshot_path),
+            "saved_path": str(screenshot_path),
             "timestamp": cap.get("timestamp", time.time()),
             "width": cap.get("width"),
             "height": cap.get("height"),
@@ -268,14 +260,12 @@ class UnifiedContextEngine:
             "visible_errors": errors,
             "ocr": ocr,
             "label": label,
-            "saved": False,
+            "saved": True,
         }
         self.screenshots.append(record)
         self.remember_entity("screenshot", record, label=label or "latest screenshot")
 
-        if save:
-            return self.save_screenshot(record["id"], label=label)
-        return {"success": True, "verified": True, **record}
+        return {"success": True, "verified": screenshot_path.exists(), **record}
 
     def _find_screenshot(self, ref: Optional[str]) -> Optional[Dict[str, Any]]:
         if not self.screenshots:
@@ -341,11 +331,9 @@ class UnifiedContextEngine:
         if not src.exists():
             return {"success": False, "verified": False, "error": "Screenshot file no longer exists."}
 
-        safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", (label or record.get("label") or "saved").strip()).strip("_")
-        dest = SCREENSHOTS_DIR / f"maya_{safe_label}_{int(time.time())}.png"
-        shutil.copy2(src, dest)
+        # Captures are already persisted in the user's normal Screenshots folder.
         record["saved"] = True
-        record["saved_path"] = str(dest)
+        record["saved_path"] = str(src)
         if label:
             record["label"] = label
             self.named_refs[label.lower().strip()] = {
@@ -355,7 +343,7 @@ class UnifiedContextEngine:
                 "label": label,
                 "timestamp": time.time(),
             }
-        return {"success": True, "verified": dest.exists(), **record}
+        return {"success": True, "verified": src.exists(), **record}
 
     def compare_screenshots(self, newer_ref: Optional[str] = "latest", older_ref: Optional[str] = "previous") -> Dict[str, Any]:
         newer = self._find_screenshot(newer_ref)
