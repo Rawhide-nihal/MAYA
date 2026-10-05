@@ -6,8 +6,13 @@ import time
 import uuid
 import mimetypes
 import os
+import json
+import re
+from difflib import SequenceMatcher
 from collections import deque
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, Optional, List
+
+from maya_core.config import MAYA_DATA_DIR
 
 
 class CommunicationBridge:
@@ -23,6 +28,206 @@ class CommunicationBridge:
         self._results: Dict[str, Dict[str, Any]] = {}
         self._last_extension_seen: Optional[float] = None
         self._browser_context: Dict[str, Any] = {}
+        self._contacts_path = MAYA_DATA_DIR / "communication_contacts.json"
+        self._contacts: Dict[str, Dict[str, Dict[str, Any]]] = {
+            "whatsapp": {},
+            "telegram": {},
+            "gmail": {},
+        }
+        self._load_contacts()
+
+    @staticmethod
+    def _normalize_contact_name(value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+        return cleaned
+
+    def _load_contacts(self) -> None:
+        try:
+            if not self._contacts_path.exists():
+                return
+            raw = json.loads(self._contacts_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            for service in self._contacts:
+                service_data = raw.get(service, {})
+                if isinstance(service_data, dict):
+                    self._contacts[service] = service_data
+        except Exception:
+            # Contact sync is an enhancement; a damaged cache must not stop MAYA.
+            pass
+
+    def _save_contacts(self) -> None:
+        try:
+            self._contacts_path.parent.mkdir(parents=True, exist_ok=True)
+            self._contacts_path.write_text(
+                json.dumps(self._contacts, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def update_contacts(
+        self,
+        service: str,
+        contacts: List[Any],
+        source: str = "browser",
+    ) -> Dict[str, Any]:
+        service_name = str(service or "").lower().strip()
+        if service_name not in self._contacts:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Unsupported contact service: {service_name}",
+            }
+
+        reserved = {
+            "new chat", "search", "archived", "communities", "status",
+            "channels", "settings", "profile", "new group", "contacts",
+            "frequently contacted", "recent chats"
+        }
+        added = 0
+        updated = 0
+        now = time.time()
+
+        with self._lock:
+            store = self._contacts[service_name]
+            for item in contacts or []:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("title") or "").strip()
+                else:
+                    name = str(item or "").strip()
+
+                normalized = self._normalize_contact_name(name)
+                if (
+                    not normalized
+                    or len(name) > 160
+                    or normalized in reserved
+                    or normalized.startswith("http")
+                ):
+                    continue
+
+                existing = store.get(normalized)
+                if existing:
+                    existing["name"] = name
+                    existing["last_seen"] = now
+                    existing["source"] = source
+                    updated += 1
+                else:
+                    store[normalized] = {
+                        "name": name,
+                        "first_seen": now,
+                        "last_seen": now,
+                        "source": source,
+                    }
+                    added += 1
+
+            self._save_contacts()
+            total = len(store)
+
+        return {
+            "success": True,
+            "verified": True,
+            "service": service_name,
+            "added": added,
+            "updated": updated,
+            "total": total,
+        }
+
+    def list_contacts(self, service: str = "whatsapp", limit: int = 500) -> List[Dict[str, Any]]:
+        service_name = str(service or "").lower().strip()
+        with self._lock:
+            values = list(self._contacts.get(service_name, {}).values())
+        values.sort(key=lambda item: (
+            -float(item.get("last_seen", 0) or 0),
+            str(item.get("name", "")).casefold()
+        ))
+        return [dict(item) for item in values[:max(1, min(int(limit), 2000))]]
+
+    def resolve_contact(self, service: str, query: str) -> Dict[str, Any]:
+        service_name = str(service or "").lower().strip()
+        normalized = self._normalize_contact_name(query)
+        with self._lock:
+            store = dict(self._contacts.get(service_name, {}))
+
+        if not normalized or not store:
+            return {
+                "matched": False,
+                "ambiguous": False,
+                "query": query,
+                "service": service_name,
+                "suggestions": [],
+            }
+
+        exact = store.get(normalized)
+        if exact:
+            return {
+                "matched": True,
+                "ambiguous": False,
+                "query": query,
+                "service": service_name,
+                "name": exact.get("name"),
+                "resolution": "exact_local_contact",
+                "score": 1.0,
+            }
+
+        contains = [
+            item for key, item in store.items()
+            if normalized in key or key in normalized
+        ]
+        if len(contains) == 1:
+            return {
+                "matched": True,
+                "ambiguous": False,
+                "query": query,
+                "service": service_name,
+                "name": contains[0].get("name"),
+                "resolution": "unique_local_substring",
+                "score": 0.95,
+            }
+        if len(contains) > 1:
+            return {
+                "matched": False,
+                "ambiguous": True,
+                "query": query,
+                "service": service_name,
+                "suggestions": [item.get("name") for item in contains[:8]],
+            }
+
+        scored = []
+        for key, item in store.items():
+            score = SequenceMatcher(None, normalized, key).ratio()
+            if score >= 0.84:
+                scored.append((score, item))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+
+        if scored:
+            top_score, top = scored[0]
+            second_score = scored[1][0] if len(scored) > 1 else 0.0
+            if top_score >= 0.88 and (top_score - second_score) >= 0.08:
+                return {
+                    "matched": True,
+                    "ambiguous": False,
+                    "query": query,
+                    "service": service_name,
+                    "name": top.get("name"),
+                    "resolution": "unique_local_fuzzy",
+                    "score": round(top_score, 3),
+                }
+            return {
+                "matched": False,
+                "ambiguous": True,
+                "query": query,
+                "service": service_name,
+                "suggestions": [item.get("name") for _, item in scored[:8]],
+            }
+
+        return {
+            "matched": False,
+            "ambiguous": False,
+            "query": query,
+            "service": service_name,
+            "suggestions": [],
+        }
 
     def heartbeat(self) -> None:
         with self._lock:
@@ -164,6 +369,10 @@ class CommunicationBridge:
             "last_extension_seen": last_seen,
             "pending_commands": pending,
             "browser_context": self.get_browser_context(),
+            "contact_counts": {
+                service: len(values)
+                for service, values in self._contacts.items()
+            },
         }
 
 
