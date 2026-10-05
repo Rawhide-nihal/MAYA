@@ -12,9 +12,10 @@ import json
 import time
 import hmac
 import io
+import threading
 from pathlib import Path
 
-from maya_server import app, AUTH_TOKEN, permissions, planner, ledger
+from maya_server import app, AUTH_TOKEN, permissions, planner, ledger, communication_bridge, unified_context
 from security.permissions.tier import PermissionLevel, PermissionManager, hash_arguments
 
 class TestSecurityIntegration(unittest.TestCase):
@@ -191,6 +192,24 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertFalse(tampered.granted)
         self.assertTrue(tampered.requires_confirmation)
 
+        attachment_original = dict(original_args)
+        attachment_original["attachment_path"] = "D:/MAYA/capture-a.png"
+        attachment_decision = test_pm.check_permission(
+            "send_communication", attachment_original
+        )
+        attachment_token = test_pm.resolve_confirmation(
+            attachment_decision.confirmation_id, approved=True
+        )
+        attachment_tampered = dict(attachment_original)
+        attachment_tampered["attachment_path"] = "D:/MAYA/different-secret.png"
+        attachment_replay = test_pm.check_permission(
+            "send_communication",
+            attachment_tampered,
+            token=attachment_token
+        )
+        self.assertFalse(attachment_replay.granted)
+        self.assertTrue(attachment_replay.requires_confirmation)
+
     def test_attachment_upload_requires_auth_and_registers_context(self):
         unauth = self.client.post(
             "/api/attachments",
@@ -218,6 +237,81 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertEqual(ctx.status_code, 200)
         ctx_data = ctx.get_json()
         self.assertTrue(ctx_data.get("attachments"))
+
+    def test_communication_attachment_is_bound_to_active_dispatched_command(self):
+        attachment = unified_context.session_dir / "bridge_test.txt"
+        attachment.parent.mkdir(parents=True, exist_ok=True)
+        attachment.write_text("command-bound attachment", encoding="utf-8")
+
+        command = {
+            "service": "whatsapp",
+            "action": "compose",
+            "recipient": "current chat",
+            "message": "",
+            "profile": "main",
+            "attachment_path": str(attachment),
+        }
+        holder = {}
+
+        def submit_command():
+            holder["result"] = communication_bridge.submit(command, timeout=5.0)
+
+        worker = threading.Thread(target=submit_command, daemon=True)
+        worker.start()
+
+        dispatched = None
+        for _ in range(20):
+            response = self.client.get(
+                "/api/communication/next?service=whatsapp",
+                headers={"X-Maya-Token": AUTH_TOKEN}
+            )
+            self.assertEqual(response.status_code, 200)
+            dispatched = response.get_json().get("command")
+            if dispatched:
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(dispatched)
+        command_id = dispatched["command_id"]
+        self.assertTrue(dispatched.get("has_attachment"))
+        self.assertEqual(dispatched.get("attachment_name"), "bridge_test.txt")
+        self.assertNotIn("attachment_path", dispatched)
+
+        unauthorized = self.client.get(
+            f"/api/communication/attachment/{command_id}"
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        fetched = self.client.get(
+            f"/api/communication/attachment/{command_id}",
+            headers={"X-Maya-Token": AUTH_TOKEN}
+        )
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.data, b"command-bound attachment")
+
+        completed = self.client.post(
+            "/api/communication/result",
+            headers=self.auth_headers,
+            json={
+                "command_id": command_id,
+                "result": {
+                    "success": True,
+                    "verified": True,
+                    "prepared": True,
+                    "sent": False
+                }
+            }
+        )
+        self.assertEqual(completed.status_code, 200)
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder.get("result", {}).get("success"))
+
+        after_completion = self.client.get(
+            f"/api/communication/attachment/{command_id}",
+            headers={"X-Maya-Token": AUTH_TOKEN}
+        )
+        self.assertEqual(after_completion.status_code, 404)
 
     def test_browser_context_rejects_unauthorized_update(self):
         bad = self.client.post(
