@@ -178,11 +178,11 @@ class CommunicationAgent:
         profile: Optional[str] = "main",
     ) -> Dict[str, Any]:
         service_name = self._normalize_service(service)
-        if service_name not in {"whatsapp", "telegram"}:
+        if service_name != "whatsapp":
             return {
                 "success": False,
                 "verified": False,
-                "error": "Contact sync currently supports WhatsApp and Telegram.",
+                "error": "Full contact sync is currently implemented for WhatsApp Web.",
             }
 
         launch = self.windows.launch_application(
