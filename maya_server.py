@@ -80,7 +80,13 @@ vision = VisionAgent()
 browser = BrowserAgent()
 communication = CommunicationAgent(windows=windows, bridge=communication_bridge)
 personality = PersonalityEngine()
-unified_context = UnifiedContextEngine(windows=windows, vision=vision, memory=memory, ledger=ledger)
+unified_context = UnifiedContextEngine(
+    windows=windows,
+    vision=vision,
+    memory=memory,
+    ledger=ledger,
+    browser_context_source=communication_bridge
+)
 attachment_intelligence = AttachmentIntelligence()
 
 planner = DynamicTaskPlanner(
@@ -378,6 +384,18 @@ def communication_status():
 @app.route("/api/context", methods=["GET"])
 def get_unified_context():
     return jsonify(unified_context.session_summary())
+
+
+@app.route("/api/browser/context", methods=["POST"])
+def update_browser_context():
+    data = request.get_json(silent=True) or {}
+    communication_bridge.update_browser_context(data)
+    return jsonify({"success": True})
+
+
+@app.route("/api/browser/context", methods=["GET"])
+def get_browser_context():
+    return jsonify(communication_bridge.get_browser_context())
 
 
 @app.route("/api/attachments", methods=["POST"])
