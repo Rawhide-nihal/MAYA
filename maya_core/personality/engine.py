@@ -175,11 +175,27 @@ class PersonalityEngine:
         failed_count = statuses.count("failed")
         if failed_count >= 2:
             cues.append(f"There have been {failed_count} recent failed actions.")
+        failed_builds = [
+            a for a in recent_actions
+            if isinstance(a, dict)
+            and str(a.get("status", "")).lower() == "failed"
+            and str(a.get("tool_name", "")).lower() in {"run_build", "build_project", "run_tests"}
+        ]
+        if len(failed_builds) >= 2:
+            cues.append(f"Build/test tooling has failed {len(failed_builds)} times recently.")
         if statuses and statuses[0] == "success" and "failed" in statuses[1:]:
             cues.append("A recent action succeeded after earlier failures.")
 
+        browser = context.get("browser_context") or {}
+        try:
+            tab_count = int(browser.get("tab_count")) if browser.get("tab_count") is not None else None
+        except (TypeError, ValueError):
+            tab_count = None
+        if tab_count is not None and tab_count >= 20:
+            cues.append(f"Chrome genuinely has {tab_count} tabs open in the focused window.")
+
         active_title = str(context.get("active_window_title") or "").lower()
-        if "chrome" in active_title:
+        if "chrome" in active_title and not browser:
             cues.append("Chrome is the active application.")
 
         return cues
