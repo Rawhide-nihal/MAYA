@@ -81,7 +81,12 @@ class MayaCheckpointProvider(BaseModelProvider):
                 torch_dtype = torch.float32
 
             if self.device == "cpu":
-                torch.set_num_threads(1)
+                # Training uses a single-thread workaround on this Windows machine, but
+                # interactive inference should use multiple CPU cores.
+                physical = os.cpu_count() or 4
+                inference_threads = max(2, min(8, physical))
+                torch.set_num_threads(inference_threads)
+                print(f"[MayaCheckpointProvider] CPU inference threads: {inference_threads}")
 
             print(f"[MayaCheckpointProvider] Loading model on {self.device} ({torch_dtype})...")
             self.tokenizer = AutoTokenizer.from_pretrained(str(self.checkpoint_dir), trust_remote_code=True)
@@ -154,10 +159,8 @@ class MayaCheckpointProvider(BaseModelProvider):
         from transformers import TextIteratorStreamer
         from threading import Thread
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        sys_p = system_prompt or "You are MAYA, a concise, natural and helpful personal AI assistant."
+        messages = [{"role": "system", "content": sys_p}, {"role": "user", "content": prompt}]
 
         if hasattr(self.tokenizer, "apply_chat_template") and self.tokenizer.chat_template:
             try:
