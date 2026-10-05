@@ -309,9 +309,30 @@ class MayaBrain:
 
         # Check if permission confirmation is needed
         if plan_result.get("requires_confirmation"):
+            pending_step = plan_result.get("step", {}) or {}
+            pending_tool = pending_step.get("tool")
+            pending_args = pending_step.get("arguments", {}) or {}
+            confirmation_reply = (
+                f"This action requires your confirmation: "
+                f"{pending_step.get('description', '')}"
+            )
+
+            if pending_tool == "send_communication":
+                service = str(pending_args.get("service", "message")).title()
+                recipient = pending_args.get("recipient", "")
+                message = str(pending_args.get("message", ""))
+                subject = str(pending_args.get("subject", "") or "")
+                preview = message if len(message) <= 240 else message[:237] + "..."
+                confirmation_reply = (
+                    f"Ready to send via {service} to {recipient}.\n"
+                    + (f"Subject: {subject}\n" if subject else "")
+                    + f"Message: {preview}\n\n"
+                    + "Authorize once to send exactly this."
+                )
+
             return {
                 "intent": "PERMISSION_REQUIRED",
-                "reply": f"This action requires your confirmation: {plan_result.get('step', {}).get('description', '')}",
+                "reply": confirmation_reply,
                 "requires_confirmation": True,
                 "confirmation_id": plan_result.get("confirmation_id"),
                 "plan_id": plan.plan_id,
