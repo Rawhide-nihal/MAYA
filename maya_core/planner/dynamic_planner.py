@@ -684,6 +684,28 @@ class DynamicTaskPlanner:
             summary = f"Applied code patch to {fp}"
 
         # Filesystem tools
+        elif tool_name == "open_file":
+            ref = arguments.get("filepath", "")
+            result = self.windows.open_file(ref)
+            if result.get("path"):
+                affected_resources.append(result["path"])
+            summary = (
+                f"Opened file {result.get('name') or ref}"
+                if result.get("success")
+                else f"Failed to open file reference {ref}"
+            )
+
+        elif tool_name == "copy_file_to_clipboard":
+            ref = arguments.get("filepath", "")
+            result = self.windows.copy_file_to_clipboard(ref)
+            if result.get("path"):
+                affected_resources.append(result["path"])
+            summary = (
+                f"Copied {result.get('name') or ref} to Windows clipboard"
+                if result.get("success")
+                else f"Failed to copy file reference {ref} to clipboard"
+            )
+
         elif tool_name == "list_directory":
             result = self.filesystem.list_directory(arguments.get("path"))
             summary = f"Listed directory contents ({result.get('count', 0)} items)"
