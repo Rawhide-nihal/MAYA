@@ -71,6 +71,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Float32Array[]>([]);
   const sourceSampleRateRef = useRef<number>(48000);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const encodeWav16Mono = (chunks: Float32Array[], sourceRate: number, targetRate = 16000): Blob => {
     const total = chunks.reduce((n, c) => n + c.length, 0);
@@ -444,6 +445,69 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     }
   };
 
+  const handleAttachmentSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || isProcessing) return;
+
+    setInternalCoreState('THINKING');
+    setInternalStatusText(`Analyzing ${file.name}...`);
+
+    try {
+      const analysis = await MayaApi.uploadAttachment(file);
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `user-attachment-${Date.now()}`,
+          sender: 'user',
+          text: `Attached: ${file.name}`,
+          time: timeStr
+        }
+      ]);
+
+      const warnings = Array.isArray(analysis?.warnings) && analysis.warnings.length > 0
+        ? ` Warnings: ${analysis.warnings.join(' ')}`
+        : '';
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `maya-attachment-${Date.now()}`,
+          sender: 'maya',
+          text: `Loaded ${file.name}. ${analysis?.summary || 'Attachment analyzed.'}${warnings}`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          details: {
+            type: analysis?.type,
+            capabilities: analysis?.capabilities,
+            confidence: analysis?.confidence,
+            page_count: analysis?.page_count,
+            slide_count: analysis?.slide_count,
+            sheet_count: analysis?.sheet_count,
+            project_markers: analysis?.project_markers,
+            languages: analysis?.languages
+          }
+        }
+      ]);
+
+      setInternalCoreState('IDLE');
+      setInternalStatusText('Attachment ready in session context.');
+    } catch (err: any) {
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Attachment analysis failed.');
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `maya-attachment-error-${Date.now()}`,
+          sender: 'maya',
+          text: `I couldn't analyze that attachment: ${err.message || 'Unknown error'}`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ]);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       handleSend();
@@ -584,7 +648,19 @@ export const ChatStage: React.FC<ChatStageProps> = ({
       <div className="pt-2">
         <div className="relative flex items-center px-4 py-2.5 rounded-full glass-panel border border-cyan-500/30 shadow-[0_0_25px_rgba(34,211,238,0.15)] bg-[#0a1224]/80">
           {/* Paperclip attachment */}
-          <button className="text-slate-400 hover:text-slate-200 transition-colors mr-3 p-1 cursor-pointer">
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            className="hidden"
+            onChange={handleAttachmentSelected}
+            accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md,.json,.jsonl,.zip,.png,.jpg,.jpeg,.webp,.py,.js,.ts,.tsx,.c,.cpp,.h,.hpp,.java,.go,.rs,.html,.css,.xml,.yaml,.yml"
+          />
+          <button
+            onClick={() => attachmentInputRef.current?.click()}
+            disabled={isProcessing}
+            title="Attach a document, project ZIP, code file or image"
+            className="text-slate-400 hover:text-slate-200 disabled:text-slate-700 transition-colors mr-3 p-1 cursor-pointer disabled:cursor-not-allowed"
+          >
             <Paperclip size={18} />
           </button>
 
