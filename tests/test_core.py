@@ -598,6 +598,15 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(context.resolve_reference("latest screenshot")["kind"], "screenshot")
         self.assertEqual(context._find_screenshot("before test")["id"], first["id"])
 
+        context.register_attachment({
+            "name": "report.pdf",
+            "path": "C:/tmp/report.pdf",
+            "type": "pdf",
+            "context_text": "report"
+        })
+        self.assertEqual(context.resolve_reference("this")["kind"], "attachment")
+        self.assertEqual(context.resolve_reference("this screenshot")["kind"], "screenshot")
+
         comparison = context.compare_screenshots("latest", "previous")
         self.assertTrue(comparison["success"])
         self.assertTrue(comparison["visual_change_detected"])
