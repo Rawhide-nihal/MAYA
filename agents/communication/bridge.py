@@ -20,10 +20,26 @@ class CommunicationBridge:
         self._events: Dict[str, threading.Event] = {}
         self._results: Dict[str, Dict[str, Any]] = {}
         self._last_extension_seen: Optional[float] = None
+        self._browser_context: Dict[str, Any] = {}
 
     def heartbeat(self) -> None:
         with self._lock:
             self._last_extension_seen = time.time()
+
+    def update_browser_context(self, context: Dict[str, Any]) -> None:
+        with self._lock:
+            self._last_extension_seen = time.time()
+            self._browser_context = {
+                "title": str(context.get("title", ""))[:500],
+                "url": str(context.get("url", ""))[:2000],
+                "window_id": context.get("window_id"),
+                "tab_id": context.get("tab_id"),
+                "updated_at": time.time(),
+            }
+
+    def get_browser_context(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._browser_context)
 
     def submit(self, command: Dict[str, Any], timeout: float = 25.0) -> Dict[str, Any]:
         service = str(command.get("service", "")).lower().strip()
@@ -104,6 +120,7 @@ class CommunicationBridge:
             "connected_recently": bool(last_seen and (time.time() - last_seen) < 5.0),
             "last_extension_seen": last_seen,
             "pending_commands": pending,
+            "browser_context": self.get_browser_context(),
         }
 
 
