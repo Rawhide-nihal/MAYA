@@ -46,15 +46,43 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   onTasksUpdate,
   onActionCompleted
 }) => {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      sender: 'maya',
-      text: "Hello, Boss. I'm MAYA, your personal AI desktop companion. I can use live local context from your PC, projects, screen and files when those sources are accessible. What are we working on?",
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      waveform: false
+  const createWelcomeMessage = (): ChatMessage => ({
+    id: 'welcome',
+    sender: 'maya',
+    text: "Hello, Boss. I'm MAYA, your personal AI desktop companion. I can use live local context from your PC, projects, screen and files when those sources are accessible. What are we working on?",
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    waveform: false
+  });
+
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    try {
+      const raw = localStorage.getItem('maya.chat.history.v1');
+      if (!raw) return [createWelcomeMessage()];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length === 0) return [createWelcomeMessage()];
+
+      return parsed
+        .filter((item: any) =>
+          item &&
+          (item.sender === 'user' || item.sender === 'maya') &&
+          typeof item.text === 'string' &&
+          typeof item.time === 'string'
+        )
+        .slice(-250)
+        .map((item: any) => ({
+          id: String(item.id || `restored-${Date.now()}-${Math.random()}`),
+          sender: item.sender,
+          text: item.text,
+          time: item.time,
+          waveform: Boolean(item.waveform),
+          // Expired confirmation IDs/tokens are deliberately never restored.
+          requiresConfirmation: false,
+          confirmationHandled: true
+        }));
+    } catch {
+      return [createWelcomeMessage()];
     }
-  ]);
+  });
 
   const [inputMessage, setInputMessage] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -217,6 +245,21 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: isProcessing ? 'auto' : 'smooth' });
   }, [messages, activeStatusText, isProcessing]);
+
+  useEffect(() => {
+    try {
+      const safeHistory = messages.slice(-250).map((message) => ({
+        id: message.id,
+        sender: message.sender,
+        text: message.text,
+        time: message.time,
+        waveform: Boolean(message.waveform)
+      }));
+      localStorage.setItem('maya.chat.history.v1', JSON.stringify(safeHistory));
+    } catch {
+      // Conversation rendering must not fail if browser storage is unavailable.
+    }
+  }, [messages]);
 
   const toggleDetails = (id: string) => {
     setExpandedDetails(prev => ({ ...prev, [id]: !prev[id] }));
