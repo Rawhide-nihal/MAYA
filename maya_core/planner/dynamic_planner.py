@@ -796,7 +796,10 @@ class DynamicTaskPlanner:
                 profile=arguments.get("profile", "main"),
                 attachment_path=arguments.get("attachment_path"),
             )
-            summary = f"Prepared {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
+            if result.get("success") and result.get("prepared"):
+                summary = f"Prepared {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
+            else:
+                summary = f"Failed to prepare {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
 
         elif tool_name == "send_communication":
             result = self.communication.send(
@@ -807,7 +810,10 @@ class DynamicTaskPlanner:
                 profile=arguments.get("profile", "main"),
                 attachment_path=arguments.get("attachment_path"),
             )
-            summary = f"Sent {arguments.get('service', 'message')} communication to {arguments.get('recipient', '')}"
+            if result.get("success") and result.get("verified") and result.get("sent"):
+                summary = f"Sent {arguments.get('service', 'message')} communication to {arguments.get('recipient', '')}"
+            else:
+                summary = f"Communication send to {arguments.get('recipient', '')} failed or was not verified"
 
         # Memory & Ledger
         elif tool_name == "search_memory":
