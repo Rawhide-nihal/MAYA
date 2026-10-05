@@ -67,7 +67,9 @@ class ContextBuilder:
 
         full_prompt = "\n".join(prompt_parts)
         if len(full_prompt) > 3500:
-            full_prompt = full_prompt[-3500:]
+            head = "\n".join(prompt_parts[:2])
+            remaining = max(0, 3500 - len(head) - 2)
+            full_prompt = head + "\n" + full_prompt[-remaining:]
 
         return {
             "prompt": full_prompt,
@@ -107,6 +109,13 @@ class ContextBuilder:
         # 6. Working memory context
         last_error = self.memory.get_working_memory("last_error", None)
 
+        live_context = {}
+        if self.unified_context is not None:
+            try:
+                live_context = self.unified_context.snapshot(include_processes=False)
+            except Exception:
+                live_context = {}
+
         context_data = {
             "active_project": proj_details.get("project_name", "None"),
             "active_project_path": proj_details.get("project_path", ""),
@@ -117,16 +126,10 @@ class ContextBuilder:
             "relevant_memories": relevant_mems,
             "conversation_history": formatted_history,
             "last_error": last_error,
-            "live_context": live_context if 'live_context' in locals() else {}
+            "live_context": live_context
         }
 
         # 7. Format into prompt string with budget
-        live_context = {}
-        if self.unified_context is not None:
-            try:
-                live_context = self.unified_context.snapshot(include_processes=False)
-            except Exception:
-                live_context = {}
 
         prompt_parts = [MAYA_SYSTEM_PROMPT]
         prompt_parts.append(self.personality.prompt_fragment(user_query, live_context))
