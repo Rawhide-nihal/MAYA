@@ -129,17 +129,50 @@ class DeterministicIntentClassifier:
 
         # Authenticated communication fallback.
         # Conservative parsing keeps ambiguous recipients from being sent accidentally.
+        email_subject = re.match(
+            r"^(?:send\s+(?:an?\s+)?email\s+to|email|mail)\s+([^\s,]+@[^\s,]+)\s+subject\s+(.+?)\s+(?:body|message)\s+(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if email_subject:
+            recipient, subject, message = (
+                email_subject.group(1).strip(),
+                email_subject.group(2).strip(),
+                email_subject.group(3).strip(),
+            )
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": "gmail",
+                    "recipient": recipient,
+                    "subject": subject,
+                    "message": message,
+                    "profile": "main"
+                },
+                "confidence": 0.99,
+                "summary": f"Send Gmail message to {recipient}"
+            }
+
         email_patterns = [
-            r"^(?:send\s+(?:an?\s+)?email\s+to|email|mail)\s+([^:,-]+?)\s*[:,-]\s*(.+)$",
+            (
+                "send_communication",
+                r"^(?:send\s+(?:an?\s+)?email\s+to|email|mail)\s+(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "prepare_communication",
+                r"^(?:draft|prepare|compose)\s+(?:an?\s+)?email\s+(?:to\s+)?(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
         ]
-        for pattern in email_patterns:
+        for tool_name, pattern in email_patterns:
             m = re.match(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
             if m:
                 recipient = m.group(1).strip()
                 message = m.group(2).strip()
+                verb = "Send" if tool_name == "send_communication" else "Prepare"
                 return {
                     "intent": "PC_ACTION",
-                    "tool": "send_communication",
+                    "tool": tool_name,
                     "arguments": {
                         "service": "gmail",
                         "recipient": recipient,
@@ -147,24 +180,50 @@ class DeterministicIntentClassifier:
                         "profile": "main"
                     },
                     "confidence": 0.97,
-                    "summary": f"Send Gmail message to {recipient}"
+                    "summary": f"{verb} Gmail message for {recipient}"
                 }
 
         messaging_patterns = [
-            r"^(?:send\s+(?:a\s+)?(whatsapp|telegram)\s+(?:message\s+)?to)\s+([^:,-]+?)\s*[:,-]\s*(.+)$",
-            r"^(?:message|msg|text)\s+(.+?)\s+on\s+(whatsapp|telegram)\s*[:,-]\s*(.+)$",
+            (
+                "send_communication",
+                "service_first",
+                r"^(?:send\s+(?:a\s+)?(whatsapp|telegram)(?:\s+message)?\s+to)\s+(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "send_communication",
+                "recipient_first",
+                r"^send\s+(.+?)\s+(?:a\s+)?(whatsapp|telegram)(?:\s+message)?\s+(?:saying|that)\s+(.+)$"
+            ),
+            (
+                "send_communication",
+                "recipient_first",
+                r"^(?:message|msg|text)\s+(.+?)\s+on\s+(whatsapp|telegram)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "send_communication",
+                "service_first",
+                r"^(whatsapp|telegram)\s+(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
+            (
+                "prepare_communication",
+                "service_first",
+                r"^(?:draft|prepare|compose)\s+(?:a\s+)?(whatsapp|telegram)(?:\s+message)?\s+(?:to\s+)?(.+?)(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$"
+            ),
         ]
-        for index, pattern in enumerate(messaging_patterns):
+        for tool_name, order, pattern in messaging_patterns:
             m = re.match(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
             if not m:
                 continue
-            if index == 0:
+
+            if order == "service_first":
                 service, recipient, message = m.group(1), m.group(2), m.group(3)
             else:
                 recipient, service, message = m.group(1), m.group(2), m.group(3)
+
+            verb = "Send" if tool_name == "send_communication" else "Prepare"
             return {
                 "intent": "PC_ACTION",
-                "tool": "send_communication",
+                "tool": tool_name,
                 "arguments": {
                     "service": service.lower(),
                     "recipient": recipient.strip(),
@@ -172,7 +231,7 @@ class DeterministicIntentClassifier:
                     "profile": "main"
                 },
                 "confidence": 0.97,
-                "summary": f"Send {service} message to {recipient.strip()}"
+                "summary": f"{verb} {service} message for {recipient.strip()}"
             }
 
         # Open authenticated communication services in the user's main Chrome profile.
