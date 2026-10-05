@@ -91,6 +91,45 @@ chrome.windows.onFocusChanged.addListener(() => {
   reportActiveTabContext();
 });
 
+async function fetchCommandAttachment(commandId) {
+  const token = await getToken();
+  const response = await fetch(
+    `${MAYA_API}/communication/attachment/${encodeURIComponent(commandId)}`,
+    { headers: { 'X-Maya-Token': token } }
+  );
+  if (response.status === 401) sessionToken = null;
+  if (!response.ok) {
+    let errorText = `Attachment bridge returned HTTP ${response.status}`;
+    try {
+      const data = await response.json();
+      if (data?.error) errorText = data.error;
+    } catch {}
+    throw new Error(errorText);
+  }
+
+  const buffer = await response.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+  const filename = filenameMatch
+    ? decodeURIComponent(filenameMatch[1].replace(/^"|"$/g, ''))
+    : 'maya-attachment';
+
+  return {
+    success: true,
+    name: filename,
+    mime: response.headers.get('Content-Type') || 'application/octet-stream',
+    size: bytes.length,
+    base64: btoa(binary)
+  };
+}
+
 async function postResult(commandId, result) {
   try {
     const token = await getToken();
@@ -111,10 +150,20 @@ async function postResult(commandId, result) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'maya-poll' && sender.tab?.id) {
     pollForCommand(message.service, sender.tab.id);
     return;
+  }
+
+  if (message?.type === 'maya-fetch-attachment' && message.commandId) {
+    fetchCommandAttachment(message.commandId)
+      .then(sendResponse)
+      .catch(error => sendResponse({
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      }));
+    return true;
   }
 
   if (message?.type === 'maya-result' && message.commandId) {
