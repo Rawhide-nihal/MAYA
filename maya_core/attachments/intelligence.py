@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -106,6 +107,28 @@ class AttachmentIntelligence:
             return text
         return text[: self.max_text_chars] + "\n...[content truncated by MAYA context budget]"
 
+    def _analyze_image_blob(self, blob: bytes, label: str) -> Dict[str, Any]:
+        try:
+            with Image.open(BytesIO(blob)) as image:
+                width, height = image.size
+                fmt = image.format
+                ocr = windows_ocr.recognize_image(image.copy())
+            text = str(ocr.get("text") or "").strip() if ocr.get("success") else ""
+            return {
+                "label": label,
+                "width": width,
+                "height": height,
+                "format": fmt,
+                "ocr_text": text[:5000],
+                "ocr_success": bool(ocr.get("success")),
+            }
+        except Exception as exc:
+            return {
+                "label": label,
+                "ocr_success": False,
+                "error": str(exc),
+            }
+
     def _text(self, path: Path) -> Dict[str, Any]:
         raw = path.read_text(encoding="utf-8", errors="replace")
         lines = raw.splitlines()
@@ -122,6 +145,8 @@ class AttachmentIntelligence:
         reader = PdfReader(str(path))
         pages: List[Dict[str, Any]] = []
         combined = []
+        embedded_images = []
+
         for index, page in enumerate(reader.pages, start=1):
             text = (page.extract_text() or "").strip()
             pages.append({
@@ -132,21 +157,91 @@ class AttachmentIntelligence:
             if text:
                 combined.append(f"\n--- PAGE {index} ---\n{text}")
 
+            if len(embedded_images) < 20:
+                try:
+                    for image_index, image_file in enumerate(page.images):
+                        if len(embedded_images) >= 20:
+                            break
+                        embedded_images.append(
+                            self._analyze_image_blob(
+                                image_file.data,
+                                f"page {index} image {image_index + 1}: {getattr(image_file, 'name', '')}"
+                            )
+                        )
+                except Exception:
+                    pass
+
+        tables = []
+        try:
+            import pdfplumber
+            with pdfplumber.open(str(path)) as pdf:
+                for page_index, page in enumerate(pdf.pages[:80], start=1):
+                    try:
+                        found = page.extract_tables() or []
+                    except Exception:
+                        found = []
+                    for table_index, table in enumerate(found[:20], start=1):
+                        rows = []
+                        for row in (table or [])[:200]:
+                            rows.append([
+                                "" if cell is None else str(cell)
+                                for cell in (row or [])[:40]
+                            ])
+                        if rows:
+                            tables.append({
+                                "page": page_index,
+                                "table": table_index,
+                                "rows": rows,
+                            })
+        except Exception:
+            # PDF text extraction still works when optional table heuristics fail.
+            pass
+
+        for table in tables[:40]:
+            combined.append(
+                f"\n--- PAGE {table['page']} TABLE {table['table']} ---"
+            )
+            combined.extend(" | ".join(row) for row in table["rows"][:100])
+
+        for image in embedded_images:
+            if image.get("ocr_text"):
+                combined.append(
+                    f"\n--- EMBEDDED IMAGE OCR {image.get('label')} ---\n"
+                    + image["ocr_text"]
+                )
+
         extracted = self._bounded("".join(combined))
         warnings = []
         if not extracted.strip():
             warnings.append(
-                "No extractable PDF text was found. This may be a scanned/image-only PDF; "
-                "semantic OCR is not currently available in the local core."
+                "No extractable PDF text/table/OCR content was found. The PDF may contain visual material "
+                "that is not readable by the current grounded local extractors."
             )
+        if embedded_images and not any(img.get("ocr_text") for img in embedded_images):
+            warnings.append(
+                "Embedded PDF images were detected, but no readable OCR text was recovered from them. "
+                "MAYA will not invent their visual meaning."
+            )
+
         return {
-            "capabilities": ["page_text_extraction", "page_cross_reference"],
+            "capabilities": [
+                "page_text_extraction", "page_cross_reference",
+                "table_extraction", "embedded_image_metadata", "embedded_image_ocr"
+            ],
             "page_count": len(reader.pages),
             "pages": pages[:80],
+            "table_count": len(tables),
+            "tables": tables[:40],
+            "embedded_image_count_analyzed": len(embedded_images),
+            "embedded_images": embedded_images,
             "extracted_text": extracted,
             "warnings": warnings,
             "confidence": "high" if extracted.strip() else "low",
-            "summary": f"PDF with {len(reader.pages)} page(s); extracted text from {sum(1 for p in pages if p['char_count'])} page(s).",
+            "summary": (
+                f"PDF with {len(reader.pages)} page(s), {len(tables)} extracted table(s), "
+                f"and {len(embedded_images)} embedded image(s) analyzed; "
+                f"text recovered from {sum(1 for p in pages if p['char_count'])} page(s)."
+            ),
         }
 
     def _docx(self, path: Path) -> Dict[str, Any]:
@@ -158,44 +253,123 @@ class AttachmentIntelligence:
         for t_index, table in enumerate(doc.tables, start=1):
             rows = []
             for row in table.rows[:200]:
-                rows.append([cell.text for cell in row.cells])
+                rows.append([cell.text for cell in row.cells[:40]])
             tables.append({"table": t_index, "rows": rows})
+
+        embedded_images = []
+        try:
+            with zipfile.ZipFile(path, "r") as archive:
+                media = [
+                    name for name in archive.namelist()
+                    if name.lower().startswith("word/media/")
+                ][:30]
+                for name in media:
+                    embedded_images.append(
+                        self._analyze_image_blob(archive.read(name), name)
+                    )
+        except Exception:
+            pass
 
         text_parts = paragraphs[:]
         for table in tables:
             text_parts.append(f"\n--- TABLE {table['table']} ---")
             text_parts.extend(" | ".join(row) for row in table["rows"])
+        for image in embedded_images:
+            if image.get("ocr_text"):
+                text_parts.append(
+                    f"\n--- EMBEDDED IMAGE OCR {image.get('label')} ---\n"
+                    + image["ocr_text"]
+                )
+
+        warnings = []
+        if embedded_images and not any(img.get("ocr_text") for img in embedded_images):
+            warnings.append(
+                "Embedded Word images were detected, but no readable OCR text was recovered; "
+                "their visual meaning is not inferred."
+            )
 
         return {
-            "capabilities": ["paragraph_extraction", "table_extraction"],
+            "capabilities": [
+                "paragraph_extraction", "table_extraction",
+                "embedded_image_metadata", "embedded_image_ocr"
+            ],
             "paragraph_count": len(paragraphs),
             "table_count": len(tables),
             "tables": tables[:30],
+            "embedded_image_count": len(embedded_images),
+            "embedded_images": embedded_images,
+            "warnings": warnings,
             "extracted_text": self._bounded("\n".join(text_parts)),
-            "summary": f"Word document with {len(paragraphs)} non-empty paragraph(s) and {len(tables)} table(s).",
+            "summary": (
+                f"Word document with {len(paragraphs)} non-empty paragraph(s), "
+                f"{len(tables)} table(s), and {len(embedded_images)} embedded image(s)."
+            ),
         }
 
     def _pptx(self, path: Path) -> Dict[str, Any]:
         from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
 
         prs = Presentation(str(path))
         slides = []
         combined = []
+        embedded_images = []
         for idx, slide in enumerate(prs.slides, start=1):
             texts = []
-            for shape in slide.shapes:
+            slide_images = []
+            for shape_index, shape in enumerate(slide.shapes, start=1):
                 text = getattr(shape, "text", "")
                 if text and text.strip():
                     texts.append(text.strip())
-            slides.append({"slide": idx, "text": texts})
+
+                if (
+                    getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE
+                    and len(embedded_images) < 40
+                ):
+                    try:
+                        image = self._analyze_image_blob(
+                            shape.image.blob,
+                            f"slide {idx} picture {shape_index}"
+                        )
+                        embedded_images.append(image)
+                        slide_images.append(image)
+                    except Exception:
+                        pass
+
+            slides.append({
+                "slide": idx,
+                "text": texts,
+                "images": slide_images,
+            })
             combined.append(f"\n--- SLIDE {idx} ---\n" + "\n".join(texts))
+            for image in slide_images:
+                if image.get("ocr_text"):
+                    combined.append(
+                        f"\n[Slide {idx} image OCR] {image['ocr_text']}"
+                    )
+
+        warnings = []
+        if embedded_images and not any(img.get("ocr_text") for img in embedded_images):
+            warnings.append(
+                "PowerPoint pictures were detected, but no readable OCR text was recovered; "
+                "MAYA will not invent their visual meaning."
+            )
 
         return {
-            "capabilities": ["slide_text_extraction", "slide_cross_reference"],
+            "capabilities": [
+                "slide_text_extraction", "slide_cross_reference",
+                "embedded_image_metadata", "embedded_image_ocr"
+            ],
             "slide_count": len(prs.slides),
             "slides": slides,
+            "embedded_image_count": len(embedded_images),
+            "embedded_images": embedded_images,
+            "warnings": warnings,
             "extracted_text": self._bounded("".join(combined)),
-            "summary": f"PowerPoint with {len(prs.slides)} slide(s).",
+            "summary": (
+                f"PowerPoint with {len(prs.slides)} slide(s) and "
+                f"{len(embedded_images)} picture(s) analyzed."
+            ),
         }
 
     def _xlsx(self, path: Path) -> Dict[str, Any]:
