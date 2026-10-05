@@ -834,11 +834,19 @@ class MayaBrain:
                 message = str(pending_args.get("message", ""))
                 subject = str(pending_args.get("subject", "") or "")
                 preview = message if len(message) <= 240 else message[:237] + "..."
+                attachment_path = str(pending_args.get("attachment_path", "") or "")
+                attachment_line = ""
+                if attachment_path:
+                    normalized_attachment = attachment_path.replace("\\", "/")
+                    attachment_name = normalized_attachment.rsplit("/", 1)[-1]
+                    attachment_line = f"Attachment: {attachment_name}\n"
+
                 confirmation_reply = (
                     f"Ready to send via {service} to {recipient}.\n"
                     + (f"Subject: {subject}\n" if subject else "")
-                    + f"Message: {preview}\n\n"
-                    + "Authorize once to send exactly this."
+                    + attachment_line
+                    + (f"Message: {preview}\n" if preview else "")
+                    + "\nAuthorize once to send exactly this."
                 )
 
             return {
