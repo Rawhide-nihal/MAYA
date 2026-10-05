@@ -62,3 +62,12 @@ jobs:
 
       - name: Typecheck and Vite Production Build
         run: npm run build
+
+      - name: Validate MAYA Chrome Extension
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('../chrome-extension/manifest.json','utf8')); console.log('manifest ok')"
+          node --check ../chrome-extension/background.js
+          node --check ../chrome-extension/common.js
+          node --check ../chrome-extension/gmail.js
+          node --check ../chrome-extension/whatsapp.js
+          node --check ../chrome-extension/telegram.js
