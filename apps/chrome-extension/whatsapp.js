@@ -87,9 +87,21 @@
     const recipient = String(command.recipient || '').trim();
     const message = String(command.message || '').trim();
 
-    const selected = await selectContact(recipient);
-    if (!selected.ok) {
-      return { success: false, verified: false, error: selected.error };
+    const useCurrentChat = ['current chat', 'current conversation'].includes(M.normalize(recipient));
+    if (!useCurrentChat) {
+      const selected = await selectContact(recipient);
+      if (!selected.ok) {
+        return { success: false, verified: false, error: selected.error };
+      }
+    } else {
+      const currentComposer = await M.waitFor(findComposer, 5000);
+      if (!currentComposer) {
+        return {
+          success: false,
+          verified: false,
+          error: 'No active WhatsApp chat is open. MAYA refused to guess a recipient.'
+        };
+      }
     }
 
     let attachmentVerified = false;
