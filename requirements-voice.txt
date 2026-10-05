@@ -1,0 +1,7 @@
+# MAYA optional local voice stack
+# Recommended runtime: Python 3.11 or 3.12
+# Install with: python -m pip install -r requirements-voice.txt
+
+faster-whisper>=1.1.0
+kokoro>=0.9.4; python_version < "3.13"
+soundfile>=0.12.1
