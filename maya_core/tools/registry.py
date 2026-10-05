@@ -505,7 +505,7 @@ def build_default_tool_registry() -> ToolRegistry:
         parameters=[
             ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
             ToolParameter("recipient", "string", "Exact email, phone/contact name, or Telegram username/contact", required=True),
-            ToolParameter("message", "string", "Message body to prepare", required=True),
+            ToolParameter("message", "string", "Optional message body to prepare when sending an attachment", required=False, default=""),
             ToolParameter("subject", "string", "Optional Gmail subject", required=False),
             ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
             ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
@@ -521,7 +521,7 @@ def build_default_tool_registry() -> ToolRegistry:
         parameters=[
             ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
             ToolParameter("recipient", "string", "Exact email, phone/contact name, or Telegram username/contact", required=True),
-            ToolParameter("message", "string", "Message body to send", required=True),
+            ToolParameter("message", "string", "Optional message body to send when an attachment is present", required=False, default=""),
             ToolParameter("subject", "string", "Optional Gmail subject", required=False),
             ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
             ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
