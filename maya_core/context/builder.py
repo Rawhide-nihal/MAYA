@@ -10,6 +10,7 @@ from memory.store import MemoryStore
 from security.audit.ledger import ActionLedger
 from agents.windows.agent import WindowsAgent
 from agents.developer.agent import DeveloperAgent
+from maya_core.personality.engine import PersonalityEngine
 
 class ContextBuilder:
     def __init__(
@@ -18,13 +19,17 @@ class ContextBuilder:
         ledger: ActionLedger,
         windows: WindowsAgent,
         developer: DeveloperAgent,
-        max_context_chars: int = 6000
+        max_context_chars: int = 6000,
+        unified_context=None,
+        personality: Optional[PersonalityEngine] = None
     ):
         self.memory = memory
         self.ledger = ledger
         self.windows = windows
         self.developer = developer
         self.max_context_chars = max_context_chars
+        self.unified_context = unified_context
+        self.personality = personality or PersonalityEngine()
 
     def build_chat_context(self, user_query: str) -> Dict[str, Any]:
         """Builds lightweight context for ordinary conversation without scanning the PC."""
@@ -39,7 +44,20 @@ class ContextBuilder:
             for h in history[-4:]
         ]
 
+        live_context = {}
+        if self.unified_context is not None:
+            try:
+                live_context = self.unified_context.snapshot(include_processes=False)
+            except Exception:
+                live_context = {}
+
         prompt_parts = [MAYA_SYSTEM_PROMPT]
+        prompt_parts.append(self.personality.prompt_fragment(user_query, live_context))
+        if self.unified_context is not None:
+            try:
+                prompt_parts.append(self.unified_context.prompt_fragment())
+            except Exception:
+                pass
         if relevant_mems:
             prompt_parts.append("\nRELEVANT MEMORY:")
             prompt_parts.extend(f"- {m}" for m in relevant_mems)
@@ -57,6 +75,9 @@ class ContextBuilder:
                 "mode": "conversation",
                 "relevant_memories": relevant_mems,
                 "conversation_history": formatted_history,
+                "live_context": live_context,
+                "personality_mode": self.personality.current_mode().value,
+                "response_depth": self.personality.response_depth(user_query).value,
             },
         }
 
@@ -95,11 +116,25 @@ class ContextBuilder:
             "recent_actions": recent_action_summaries,
             "relevant_memories": relevant_mems,
             "conversation_history": formatted_history,
-            "last_error": last_error
+            "last_error": last_error,
+            "live_context": live_context if 'live_context' in locals() else {}
         }
 
         # 7. Format into prompt string with budget
+        live_context = {}
+        if self.unified_context is not None:
+            try:
+                live_context = self.unified_context.snapshot(include_processes=False)
+            except Exception:
+                live_context = {}
+
         prompt_parts = [MAYA_SYSTEM_PROMPT]
+        prompt_parts.append(self.personality.prompt_fragment(user_query, live_context))
+        if self.unified_context is not None:
+            try:
+                prompt_parts.append(self.unified_context.prompt_fragment())
+            except Exception:
+                pass
         prompt_parts.append("\nACTIVE WORKSPACE CONTEXT:")
         prompt_parts.append(f"- Project: {context_data['active_project']} ({context_data['project_language']})")
         if context_data["recent_actions"]:
@@ -119,7 +154,10 @@ class ContextBuilder:
 
         # Budget trimming if needed
         if len(full_prompt) > self.max_context_chars:
-            full_prompt = full_prompt[-self.max_context_chars:]
+            # Preserve system/personality instructions while trimming older context.
+            head = "\n".join(prompt_parts[:2])
+            remaining = max(0, self.max_context_chars - len(head) - 2)
+            full_prompt = head + "\n" + full_prompt[-remaining:]
 
         return {
             "prompt": full_prompt,
