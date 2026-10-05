@@ -18,7 +18,7 @@ async function pollForCommand(service, tabId) {
   try {
     const token = await getToken();
     const response = await fetch(
-      `${MAYA_API}/communication/next?service=${encodeURIComponent(service)}`,
+      `${MAYA_API}/communication/next?service=${encodeURIComponent(service)}&tab_id=${encodeURIComponent(tabId)}`,
       {
         method: 'GET',
         headers: { 'X-Maya-Token': token }
