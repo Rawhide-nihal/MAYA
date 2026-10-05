@@ -39,6 +39,11 @@
       }) || null;
   }
 
+  function findFileInput() {
+    return document.querySelector('input[type="file"][name="Filedata"]') ||
+      document.querySelector('input[type="file"]');
+  }
+
   function findSendButton() {
     return Array.from(document.querySelectorAll('[role="button"], button'))
       .filter(M.visible)
@@ -104,7 +109,49 @@
     if (!body) {
       return { success: false, verified: false, error: 'Gmail message body was not found.' };
     }
-    M.setEditableText(body, message);
+    if (message) M.setEditableText(body, message);
+
+    let attachmentVerified = false;
+    if (command.has_attachment) {
+      const attachment = await M.fetchAttachment(command);
+      let fileInput = findFileInput();
+
+      if (!fileInput) {
+        const attachButton = M.findByAriaContains('attach files', '[aria-label]') ||
+          M.findByAriaContains('attach', '[aria-label]');
+        if (attachButton) attachButton.click();
+        fileInput = await M.waitFor(findFileInput, 5000);
+      }
+
+      if (!fileInput || !M.setFileInput(fileInput, attachment)) {
+        return {
+          success: false,
+          verified: false,
+          error: 'Gmail attachment input was not available or rejected the selected file.'
+        };
+      }
+
+      const uploaded = await M.waitFor(() => {
+        const name = M.normalize(command.attachment_name);
+        if (!name) return null;
+        return Array.from(document.querySelectorAll('[aria-label], [data-tooltip], span, div'))
+          .filter(M.visible)
+          .find(el =>
+            M.normalize(el.textContent).includes(name) ||
+            M.normalize(el.getAttribute('aria-label')).includes(name) ||
+            M.normalize(el.getAttribute('data-tooltip')).includes(name)
+          ) || null;
+      }, 12000);
+
+      if (!uploaded) {
+        return {
+          success: false,
+          verified: false,
+          error: 'Gmail did not expose a verified uploaded attachment state. MAYA refused to send.'
+        };
+      }
+      attachmentVerified = true;
+    }
 
     if (command.action === 'compose') {
       return {
@@ -113,7 +160,8 @@
         prepared: true,
         sent: false,
         service: 'gmail',
-        recipient
+        recipient,
+        attachment_verified: attachmentVerified
       };
     }
 
@@ -135,6 +183,7 @@
       sent: Boolean(sentNotice),
       service: 'gmail',
       recipient,
+      attachment_verified: attachmentVerified,
       send_attempted: true,
       error: sentNotice ? undefined : 'MAYA clicked Send, but Gmail did not expose a verified “Message sent” state. Check Sent mail before retrying to avoid duplicates.'
     };
