@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "MAYA Browser Bridge",
+  "version": "0.1.0",
+  "description": "Local authenticated browser bridge for MAYA communication actions.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzh0kSUAsuTjjA1YIXYzlfzQuacin2PhvXODUrnurknmwkJBEe/dU+B5AaHhTc2uomLGCWHUff6lzGwaAmHEKbCX3iZ1T4LstN4GwdaHX2KjeiHRG7j9irbzar2lT+1qb/gt46npeDeAD6P4jBv8RiErJkGmaDZnoUAMa/qkZ58ttQOqF5bSxO2Vf/EsZnMMqLm65NmCE7WjUqHDftMIf+dR2wdhgS/gcfoor1dVvzsPd4Ccolq0LaVBGxjUQR8yvndjfUznWrengFgyIglLzD/WYDvYPiYRYzVxlLzC8MP0iqhMYv5VApta41+zz/nR07v/tKFgo+bmBee/Am3xm1QIDAQAB",
+  "permissions": ["tabs"],
+  "host_permissions": [
+    "http://127.0.0.1:5000/*",
+    "http://localhost:5000/*",
+    "https://mail.google.com/*",
+    "https://web.whatsapp.com/*",
+    "https://web.telegram.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["common.js", "gmail.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://web.whatsapp.com/*"],
+      "js": ["common.js", "whatsapp.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://web.telegram.org/*"],
+      "js": ["common.js", "telegram.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
