@@ -483,6 +483,35 @@ class WindowsAgent:
                 pass
         return False
 
+    def get_explorer_selection(self) -> List[str]:
+        """Return selected File Explorer item paths for the foreground Explorer window when accessible."""
+        if sys.platform != "win32":
+            return []
+        try:
+            import win32com.client
+            foreground = win32gui.GetForegroundWindow() if HAS_WIN32 else None
+            shell = win32com.client.Dispatch("Shell.Application")
+            for window in shell.Windows():
+                try:
+                    hwnd = int(window.HWND)
+                    if foreground and hwnd != foreground:
+                        continue
+                    document = window.Document
+                    selected = document.SelectedItems()
+                    paths = []
+                    for index in range(selected.Count):
+                        item = selected.Item(index)
+                        path = getattr(item, "Path", None)
+                        if path:
+                            paths.append(str(path))
+                    if paths:
+                        return paths
+                except Exception:
+                    continue
+        except Exception:
+            return []
+        return []
+
     def list_windows(self) -> List[Dict[str, Any]]:
         """Lists all open windows with title, process name, PID, and geometry."""
         windows = []
@@ -494,10 +523,16 @@ class WindowsAgent:
                         try:
                             _, pid = win32process.GetWindowThreadProcessId(hwnd)
                             rect = win32gui.GetWindowRect(hwnd)
+                            process_name = None
+                            try:
+                                process_name = psutil.Process(pid).name()
+                            except Exception:
+                                pass
                             windows.append({
                                 "title": title,
                                 "hwnd": hwnd,
                                 "pid": pid,
+                                "process_name": process_name,
                                 "bounds": {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]}
                             })
                         except Exception:
