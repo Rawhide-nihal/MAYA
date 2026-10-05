@@ -211,7 +211,10 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertEqual(data.get("name"), "note.txt")
         self.assertIn("text_extraction", data.get("capabilities", []))
 
-        ctx = self.client.get("/api/context")
+        ctx_unauth = self.client.get("/api/context")
+        self.assertEqual(ctx_unauth.status_code, 401)
+
+        ctx = self.client.get("/api/context", headers={"X-Maya-Token": AUTH_TOKEN})
         self.assertEqual(ctx.status_code, 200)
         ctx_data = ctx.get_json()
         self.assertTrue(ctx_data.get("attachments"))
