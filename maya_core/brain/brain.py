@@ -251,7 +251,7 @@ class MayaBrain:
             if result.get("success"):
                 window = ((result.get("active_window") or {}).get("title") or "the current desktop")
                 reply = (
-                    f"Screenshot {'saved' if should_save else 'captured for this session'}, Boss. "
+                    f"Screenshot saved, Boss: {result.get('saved_path') or result.get('filepath')}. "
                     f"The active window is {window}."
                 )
             else:
