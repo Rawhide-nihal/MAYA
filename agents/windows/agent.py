@@ -250,7 +250,16 @@ class WindowsAgent:
             # Fallback to shell start-process
             cmd = ["powershell", "-NoProfile", "-Command", f"Start-Process '{app_name}'"]
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # PowerShell Start-Process returns after dispatching the detached app.
+                # Use run() for this short-lived launcher so its child handle is
+                # deterministically reaped instead of leaving a Popen ResourceWarning.
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    check=False,
+                )
                 time.sleep(1.2)
                 verified = self.is_application_running(app_name)
                 return {
