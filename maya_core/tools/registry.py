@@ -220,6 +220,10 @@ class ToolRegistry:
             "analyze_screen": lambda **kw: vision.analyze_screen(),
             "open_url": lambda url, **kw: browser.open_url(url),
             "search_web": lambda query, **kw: browser.search_web(query),
+            "sync_communication_contacts": lambda service="whatsapp", profile="main", **kw: communication.sync_contacts(
+                service=service,
+                profile=profile
+            ),
             "prepare_communication": lambda service, recipient, message, subject=None, profile="main", attachment_path=None, **kw: communication.prepare(
                 service=service,
                 recipient=recipient,
@@ -391,6 +395,18 @@ def build_default_tool_registry() -> ToolRegistry:
         category="filesystem",
         parameters=[
             ToolParameter("filepath", "string", "File path or recent-file reference", required=True)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="sync_communication_contacts",
+        description="Synchronizes locally visible contacts/chats from the authenticated WhatsApp or Telegram web UI into MAYA's private local contact index.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service: whatsapp or telegram", required=False, default="whatsapp"),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
         undo_available=False
