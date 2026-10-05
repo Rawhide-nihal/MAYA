@@ -402,10 +402,10 @@ def build_default_tool_registry() -> ToolRegistry:
 
     registry.register(ToolSchema(
         name="sync_communication_contacts",
-        description="Synchronizes locally visible contacts/chats from the authenticated WhatsApp or Telegram web UI into MAYA's private local contact index.",
+        description="Synchronizes contacts/chats from the authenticated WhatsApp Web UI into MAYA's private local contact index.",
         category="communication",
         parameters=[
-            ToolParameter("service", "string", "Communication service: whatsapp or telegram", required=False, default="whatsapp"),
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
             ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
