@@ -59,7 +59,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "telemetry_enabled": False,
     "theme": "dark-midnight",
     "chrome_main_account": "",       # Local-only email/profile hint for the user's primary Chrome profile
-    "chrome_main_profile": ""        # Optional local Chrome profile directory/name override
+    "chrome_main_profile": "",       # Optional local Chrome profile directory/name override
+    "maya_mode": "Normal",            # Normal, Work, Focus, Presentation, Savage
+    "screen_capture_privacy": "Always",
+    "context_clipboard_enabled": True,
+    "context_recent_files_enabled": True,
+    "attachment_max_mb": 75
 }
 
 def get_or_create_auth_token() -> str:
