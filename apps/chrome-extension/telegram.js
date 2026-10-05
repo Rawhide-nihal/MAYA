@@ -48,20 +48,29 @@
     else M.setEditableText(search, recipient);
 
     await M.sleep(1000);
-    const matches = M.exactTextElements(recipient, 'span, div, h3, h4');
-    const unique = Array.from(new Set(matches));
+    const resultPane =
+      document.querySelector('#column-left') ||
+      document.querySelector('.sidebar-left') ||
+      document;
+    const target = M.normalize(recipient);
+    const matches = Array.from(resultPane.querySelectorAll('span, div, h3, h4'))
+      .filter(M.visible)
+      .filter(el => M.normalize(el.textContent) === target);
 
-    if (unique.length !== 1) {
+    const rows = Array.from(new Set(
+      matches.map(el => el.closest('[role="listitem"], .ListItem, li, a, [role="button"]') || el)
+    ));
+
+    if (rows.length !== 1) {
       return {
         ok: false,
-        error: unique.length === 0
+        error: rows.length === 0
           ? `No exact Telegram contact named “${recipient}” was found.`
           : `Multiple Telegram matches exist for “${recipient}”. MAYA refused to guess.`
       };
     }
 
-    const clickable = unique[0].closest('[role="listitem"], .ListItem, li, a, [role="button"]') || unique[0];
-    clickable.click();
+    rows[0].click();
     return { ok: true };
   }
 
@@ -109,7 +118,8 @@
       sent: Boolean(emptied),
       service: 'telegram',
       recipient,
-      error: emptied ? undefined : 'Telegram did not reach a verified sent state.'
+      send_attempted: true,
+      error: emptied ? undefined : 'MAYA clicked Send, but Telegram did not expose a verified sent state. Check the conversation before retrying to avoid duplicates.'
     };
   }
 
