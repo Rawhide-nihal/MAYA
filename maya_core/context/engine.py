@@ -274,7 +274,7 @@ class UnifiedContextEngine:
         if not ref or normalized_ref in {
             "latest", "this", "that", "current",
             "latest screenshot", "this screenshot", "that screenshot",
-            "the screenshot", "current screenshot"
+            "the screenshot", "current screenshot", "screenshot"
         }:
             return self.screenshots[-1]
         if normalized_ref in {
