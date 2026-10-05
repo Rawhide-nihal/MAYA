@@ -133,19 +133,58 @@ class DeterministicIntentClassifier:
             app_raw = match_app.group(1).strip()
             # Distinguish app from file or command
             if any(term in app_raw for term in ["vs code", "vscode", "code", "notepad", "chrome", "firefox", "edge", "terminal", "powershell", "cmd", "explorer"]):
-                app_name = "Visual Studio Code" if "code" in app_raw else app_raw.title()
-                
+                if "chrome" in app_raw:
+                    app_name = "Google Chrome"
+                elif "firefox" in app_raw:
+                    app_name = "Firefox"
+                elif "edge" in app_raw:
+                    app_name = "Microsoft Edge"
+                elif "notepad" in app_raw:
+                    app_name = "Notepad"
+                elif any(term in app_raw for term in ["vs code", "vscode", "code"]):
+                    app_name = "Visual Studio Code"
+                elif "powershell" in app_raw:
+                    app_name = "PowerShell"
+                elif "cmd" in app_raw:
+                    app_name = "Command Prompt"
+                elif "terminal" in app_raw:
+                    app_name = "Windows Terminal"
+                elif "explorer" in app_raw:
+                    app_name = "Explorer"
+                else:
+                    app_name = app_raw.title()
+
+                profile_hint = None
+                if "chrome" in app_raw:
+                    email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", cleaned)
+                    if email_match:
+                        profile_hint = email_match.group(0)
+                    elif any(
+                        phrase in lower
+                        for phrase in [
+                            "main account", "main profile",
+                            "primary account", "primary profile",
+                            "default account", "my main account"
+                        ]
+                    ):
+                        profile_hint = "main"
+
                 # Check if user also asked to check project or scan errors
                 check_proj = "check" in lower or "scan" in lower or "error" in lower or "project" in lower
+                arguments = {"application": app_name}
+                if profile_hint:
+                    arguments["profile"] = profile_hint
+
                 return {
                     "intent": "DEVELOPMENT_ACTION" if check_proj else "PC_ACTION",
                     "tool": "open_application_and_inspect" if check_proj else "open_application",
-                    "arguments": {
-                        "application": app_name,
-                        "inspect_project": check_proj
-                    },
+                    "arguments": arguments,
                     "confidence": 0.95,
-                    "summary": f"Open {app_name}" + (" and scan project for errors" if check_proj else "")
+                    "summary": (
+                        f"Open {app_name}"
+                        + (f" using profile '{profile_hint}'" if profile_hint else "")
+                        + (" and scan project for errors" if check_proj else "")
+                    )
                 }
 
         # Check for system diagnostic or scan
