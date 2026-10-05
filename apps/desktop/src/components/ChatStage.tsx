@@ -214,8 +214,8 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   const activeStatusText = externalStatusText || internalStatusText;
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, activeStatusText]);
+    messagesEndRef.current?.scrollIntoView({ behavior: isProcessing ? 'auto' : 'smooth' });
+  }, [messages, activeStatusText, isProcessing]);
 
   const toggleDetails = (id: string) => {
     setExpandedDetails(prev => ({ ...prev, [id]: !prev[id] }));
@@ -232,7 +232,6 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // Add user message if new
     if (!textToSend) {
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
@@ -245,17 +244,50 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
     setIsProcessing(true);
     setInternalCoreState('THINKING');
-    setInternalSubState('PLAN');
-    setInternalStatusText('Formulating plan...');
+    setInternalSubState('ANALYZE');
+    setInternalStatusText('Thinking...');
+
+    let streamMessageId: string | null = null;
+    let streamedText = '';
 
     try {
-      const resp: ChatResponse = await MayaApi.sendChatMessage(text, permissionToken);
+      const resp: ChatResponse = await MayaApi.sendChatMessageStream(
+        text,
+        permissionToken,
+        (delta: string) => {
+          if (!delta) return;
+          streamedText += delta;
+          setInternalStatusText('Maya is responding...');
+
+          if (!streamMessageId) {
+            streamMessageId = `maya-stream-${Date.now()}`;
+            const streamingMsg: ChatMessage = {
+              id: streamMessageId,
+              sender: 'maya',
+              text: streamedText,
+              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              waveform: false
+            };
+            setMessages(prev => [...prev, streamingMsg]);
+          } else {
+            const id = streamMessageId;
+            setMessages(prev =>
+              prev.map(msg => msg.id === id ? { ...msg, text: streamedText } : msg)
+            );
+          }
+        }
+      );
 
       if (resp.tasks && resp.tasks.length > 0) {
         onTasksUpdate?.(resp.tasks);
       }
 
       if (resp.requires_confirmation) {
+        if (streamMessageId) {
+          const id = streamMessageId;
+          setMessages(prev => prev.filter(msg => msg.id !== id));
+        }
+
         setInternalCoreState('WARNING');
         setInternalStatusText('Authorization required for execution.');
 
@@ -275,18 +307,35 @@ export const ChatStage: React.FC<ChatStageProps> = ({
         return;
       }
 
-      const mayaMsg: ChatMessage = {
-        id: `maya-${Date.now()}`,
-        sender: 'maya',
-        text: resp.reply,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        details: resp.details,
-        tasks: resp.tasks,
-        waveform: true
-      };
-      setMessages(prev => [...prev, mayaMsg]);
-      onActionCompleted?.();
+      if (streamMessageId) {
+        const id = streamMessageId;
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === id
+              ? {
+                  ...msg,
+                  text: resp.reply || streamedText,
+                  details: resp.details,
+                  tasks: resp.tasks,
+                  waveform: true
+                }
+              : msg
+          )
+        );
+      } else {
+        const mayaMsg: ChatMessage = {
+          id: `maya-${Date.now()}`,
+          sender: 'maya',
+          text: resp.reply,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          details: resp.details,
+          tasks: resp.tasks,
+          waveform: true
+        };
+        setMessages(prev => [...prev, mayaMsg]);
+      }
 
+      onActionCompleted?.();
       setInternalCoreState('IDLE');
       setInternalSubState('VERIFY');
       setInternalStatusText('Ready for your command.');
@@ -296,18 +345,29 @@ export const ChatStage: React.FC<ChatStageProps> = ({
       setInternalCoreState('ERROR');
       setInternalStatusText('Service error.');
       setIsProcessing(false);
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `maya-err-${Date.now()}`,
-          sender: 'maya',
-          text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }
-      ]);
+
+      if (streamMessageId) {
+        const id = streamMessageId;
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === id
+              ? { ...msg, text: streamedText || 'The response stream was interrupted.' }
+              : msg
+          )
+        );
+      } else {
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `maya-err-${Date.now()}`,
+            sender: 'maya',
+            text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }
+        ]);
+      }
     }
   };
-
   const handleConfirmAction = async (msgId: string, confirmationId: string, approved: boolean, planId?: string) => {
     // Mark confirmation handled in UI
     setMessages(prev =>
