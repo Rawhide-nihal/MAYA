@@ -26,8 +26,38 @@ class ContextBuilder:
         self.developer = developer
         self.max_context_chars = max_context_chars
 
+    def build_chat_context(self, user_query: str) -> Dict[str, Any]:
+        """Builds lightweight context for ordinary conversation without scanning the PC."""
+        relevant_mems = self.memory.search_relevant_memories(user_query, top_k=2)
+        history = self.memory.get_conversation_history(limit=6)
+        formatted_history = [
+            f"{h['role'].upper()}: {h['message']}"
+            for h in history[-4:]
+        ]
+
+        prompt_parts = [MAYA_SYSTEM_PROMPT]
+        if relevant_mems:
+            prompt_parts.append("\nRELEVANT MEMORY:")
+            prompt_parts.extend(f"- {m}" for m in relevant_mems)
+        if formatted_history:
+            prompt_parts.append("\nRECENT CONVERSATION:")
+            prompt_parts.extend(formatted_history)
+
+        full_prompt = "\n".join(prompt_parts)
+        if len(full_prompt) > 3500:
+            full_prompt = full_prompt[-3500:]
+
+        return {
+            "prompt": full_prompt,
+            "context_metadata": {
+                "mode": "conversation",
+                "relevant_memories": relevant_mems,
+                "conversation_history": formatted_history,
+            },
+        }
+
     def build_context(self, user_query: str) -> Dict[str, Any]:
-        """Gathers active context elements and applies budgeting."""
+        """Gathers full agent context only for operational/tool requests."""
         # 1. Active project details
         proj_details = self.developer.detect_project_details()
 
@@ -78,7 +108,7 @@ class ContextBuilder:
             for turn in formatted_history[-4:]:
                 prompt_parts.append(turn)
 
-        prompt_parts.append(f"\nUSER: {user_query}\nMAYA:")
+        # The user message is passed separately to the model runtime. Do not duplicate it here.
         full_prompt = "\n".join(prompt_parts)
 
         # Budget trimming if needed
