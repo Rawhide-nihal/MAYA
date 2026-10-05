@@ -6,6 +6,18 @@ browser cookies.
 
 ## One-time installation
 
+Before loading the extension, pin the Chrome profile MAYA should treat as **main**:
+
+```powershell
+cd D:\MAYA
+python scripts/configure_chrome_main_profile.py
+```
+
+Choose the profile from the local list. MAYA stores only the selected Chrome profile
+directory under `%LOCALAPPDATA%\Maya\settings.json`.
+
+Then install the extension:
+
 1. Start MAYA Core with `python maya_server.py`.
 2. Open the **same Chrome profile** MAYA should use for communication.
 3. Visit `chrome://extensions`.
