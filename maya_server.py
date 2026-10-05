@@ -396,6 +396,44 @@ def communication_result():
     return jsonify({"success": accepted})
 
 
+@app.route("/api/communication/contacts", methods=["POST"])
+def communication_contacts_update():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    service = str(data.get("service", "")).strip().lower()
+    contacts = data.get("contacts", [])
+    source = str(data.get("source", "browser")).strip() or "browser"
+    if not isinstance(contacts, list):
+        return jsonify({"success": False, "error": "contacts must be a list"}), 400
+
+    result = communication_bridge.update_contacts(service, contacts, source=source)
+    return jsonify(result), (200 if result.get("success") else 400)
+
+
+@app.route("/api/communication/contacts", methods=["GET"])
+def communication_contacts_list():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "whatsapp").strip().lower()
+    raw_limit = request.args.get("limit", "500")
+    try:
+        limit = max(1, min(int(raw_limit), 2000))
+    except ValueError:
+        limit = 500
+    contacts = communication_bridge.list_contacts(service, limit=limit)
+    return jsonify({
+        "success": True,
+        "service": service,
+        "count": len(contacts),
+        "contacts": contacts,
+    })
+
+
 @app.route("/api/communication/status", methods=["GET"])
 def communication_status():
     req_token = request.headers.get("X-Maya-Token", "").strip()
