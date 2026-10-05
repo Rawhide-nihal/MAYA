@@ -13,6 +13,7 @@ import winreg
 import psutil
 import ctypes
 import threading
+from pathlib import Path
 import struct
 from typing import Dict, Any, List, Optional
 from maya_core.models.hardware_detector import get_real_gpu_metrics
