@@ -648,7 +648,41 @@ class WindowsAgent:
         process and let the short-lived launcher PID exit. That is normal and
         must not be reported as an application crash.
         """
-        if not force_new and self.is_application_running(app_name):
+        resolved_profile = None
+        is_chrome = "chrome" in app_name.lower()
+
+        if is_chrome and profile:
+            profile_result = self.resolve_chrome_profile(profile)
+            if not profile_result.get("success"):
+                return {
+                    "success": False,
+                    "application": "Google Chrome",
+                    "verified": False,
+                    "error": profile_result.get("error", "Chrome profile could not be resolved."),
+                }
+            resolved_profile = profile_result
+
+            if not force_new:
+                focused_profile = self.focus_chrome_profile(profile_result["profile_directory"])
+                if focused_profile.get("success"):
+                    return {
+                        "success": True,
+                        "verified": True,
+                        "application": "Google Chrome",
+                        "reused_existing": True,
+                        "focused": True,
+                        "hwnd": focused_profile.get("hwnd"),
+                        "title": focused_profile.get("title"),
+                        "profile_directory": profile_result.get("profile_directory"),
+                        "profile_name": profile_result.get("profile_name"),
+                        "profile_resolution": profile_result.get("resolution"),
+                        "message": (
+                            f"Reused the existing Chrome profile "
+                            f"'{profile_result.get('profile_name')}'."
+                        ),
+                    }
+
+        elif not force_new and self.is_application_running(app_name):
             focused = self.focus_application(app_name)
             if focused.get("success"):
                 return {
@@ -711,7 +745,6 @@ class WindowsAgent:
                 }
 
         cmd = [app_path]
-        resolved_profile = None
 
         if "chrome" in app_name.lower():
             inferred_profile = profile
@@ -723,7 +756,7 @@ class WindowsAgent:
                 inferred_profile = "main"
 
             if inferred_profile:
-                profile_result = self.resolve_chrome_profile(inferred_profile)
+                profile_result = resolved_profile or self.resolve_chrome_profile(inferred_profile)
                 if not profile_result.get("success"):
                     return {
                         "success": False,
@@ -732,10 +765,9 @@ class WindowsAgent:
                         "error": profile_result.get("error", "Chrome profile could not be resolved."),
                     }
                 resolved_profile = profile_result
-                cmd.extend([
-                    f"--profile-directory={profile_result['profile_directory']}",
-                    "--new-window",
-                ])
+                cmd.append(f"--profile-directory={profile_result['profile_directory']}")
+                if force_new:
+                    cmd.append("--new-window")
 
         if arguments:
             cmd.extend(arguments)
@@ -753,7 +785,13 @@ class WindowsAgent:
                 close_fds=True
             )
 
-            verified = self._wait_for_application(app_name, app_path, timeout=5.0)
+            if resolved_profile and is_chrome:
+                verified = self._wait_for_chrome_profile(
+                    resolved_profile["profile_directory"],
+                    timeout=5.0,
+                )
+            else:
+                verified = self._wait_for_application(app_name, app_path, timeout=5.0)
             launcher_alive = proc.poll() is None
 
             if not verified:
@@ -916,6 +954,99 @@ class WindowsAgent:
                 "verified": False,
                 "error": f"Failed to restore/focus {app_name}: {exc}",
             }
+
+    def _chrome_profile_pids(self, profile_directory: str) -> List[int]:
+        target = str(profile_directory or "").strip().casefold()
+        if not target:
+            return []
+        pids: List[int] = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if self._normalize_process_name(proc.info.get("name") or "") != "chrome":
+                    continue
+                cmdline = [str(x) for x in (proc.info.get("cmdline") or [])]
+                for arg in cmdline:
+                    if arg.lower().startswith("--profile-directory="):
+                        value = arg.split("=", 1)[1].strip().strip('"').casefold()
+                        if value == target:
+                            pids.append(int(proc.info["pid"]))
+                            break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+        return pids
+
+    def focus_chrome_profile(self, profile_directory: str) -> Dict[str, Any]:
+        """Focus a visible Chrome window belonging to the exact configured profile."""
+        if not HAS_WIN32:
+            return {"success": False, "verified": False, "error": "win32gui not available"}
+
+        profile_pids = set(self._chrome_profile_pids(profile_directory))
+        if not profile_pids:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Chrome profile '{profile_directory}' is not currently running.",
+            }
+
+        target_hwnd = None
+        target_title = None
+        target_pid = None
+
+        def _enum(hwnd, _):
+            nonlocal target_hwnd, target_title, target_pid
+            if target_hwnd is not None or not win32gui.IsWindowVisible(hwnd):
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                return
+            if pid not in profile_pids:
+                return
+            title = str(win32gui.GetWindowText(hwnd) or "").strip()
+            if not title:
+                return
+            target_hwnd = hwnd
+            target_title = title
+            target_pid = pid
+
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": str(exc)}
+
+        if target_hwnd is None:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"No visible Chrome window for profile '{profile_directory}' was found.",
+            }
+
+        try:
+            win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+            try:
+                win32gui.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+            return {
+                "success": True,
+                "verified": True,
+                "hwnd": target_hwnd,
+                "pid": target_pid,
+                "title": target_title,
+                "profile_directory": profile_directory,
+            }
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": str(exc)}
+
+    def _wait_for_chrome_profile(self, profile_directory: str, timeout: float = 5.0) -> bool:
+        deadline = time.time() + max(0.5, float(timeout))
+        while time.time() < deadline:
+            if self._chrome_profile_pids(profile_directory):
+                return True
+            time.sleep(0.20)
+        return bool(self._chrome_profile_pids(profile_directory))
 
     def focus_window_by_title(self, query: str) -> Dict[str, Any]:
         """Brings the first matching window to the foreground."""
