@@ -785,6 +785,32 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertTrue(holder["result"]["success"])
         self.assertTrue(holder["result"]["reused_existing"])
 
+    def test_whatsapp_multi_search_handles_name_typos_and_ranked_suggestions(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "search_contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+
+        bridge.update_contacts("whatsapp", [
+            {"name": "Nitheesh Kumar", "jid": "919999999999@s.whatsapp.net", "type": "contact"},
+            {"name": "Nitesh Reddy", "jid": "918888888888@s.whatsapp.net", "type": "contact"},
+            {"name": "Project Phoenix", "jid": "120363000000000001@g.us", "type": "group"},
+        ], source="test")
+
+        typo = bridge.resolve_contact("whatsapp", "Nithees Kumar")
+        self.assertTrue(typo["matched"])
+        self.assertEqual(typo["name"], "Nitheesh Kumar")
+        self.assertIn("multi_search", typo["resolution"])
+
+        prefix = bridge.resolve_contact("whatsapp", "Project Pho", record_type="group")
+        self.assertTrue(prefix["matched"])
+        self.assertEqual(prefix["name"], "Project Phoenix")
+
+        ambiguous = bridge.resolve_contact("whatsapp", "Nites")
+        self.assertFalse(ambiguous["matched"])
+        self.assertTrue(ambiguous["ambiguous"])
+        self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
+        self.assertGreaterEqual(ambiguous["suggestions"][0]["score"], ambiguous["suggestions"][1]["score"])
+
     def test_whatsapp_contact_index_exact_fuzzy_and_ambiguous_resolution(self):
         bridge = CommunicationBridge()
         bridge._contacts_path = Path(self.temp_dir.name) / "contacts.json"
@@ -934,6 +960,75 @@ class TestMayaPhase2Core(unittest.TestCase):
                 os.environ.pop("MAYA_SCREENSHOT_DIR", None)
             else:
                 os.environ["MAYA_SCREENSHOT_DIR"] = original
+
+    def test_open_service_uses_windows_tab_search_before_creating_new_tab(self):
+        class FakeBridge:
+            def submit_browser_action(self, action, timeout=6.0):
+                return {
+                    "success": False,
+                    "verified": False,
+                    "error": "simulated sleeping MV3 worker"
+                }
+
+        class FakeWindows:
+            def __init__(self):
+                self.opened = False
+                self.searched = False
+
+            def focus_chrome_tab_by_search(self, profile, search_text, expected_title=None):
+                self.searched = True
+                return {
+                    "success": True,
+                    "verified": True,
+                    "reused_existing": True,
+                    "strategy": "chrome_tab_search",
+                    "title": "WhatsApp"
+                }
+
+            def open_url_in_chrome_profile(self, profile, url):
+                self.opened = True
+                return {"success": True, "verified": True, "created_new": True}
+
+        windows = FakeWindows()
+        agent = CommunicationAgent(windows=windows, bridge=FakeBridge())
+        result = agent.open_service("whatsapp", profile="main", force_new=False)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["reused_existing"])
+        self.assertTrue(windows.searched)
+        self.assertFalse(windows.opened)
+
+    def test_open_service_force_new_bypasses_existing_tab_search(self):
+        class FakeBridge:
+            def submit_browser_action(self, action, timeout=6.0):
+                return {"success": False, "verified": False, "error": "offline"}
+
+        class FakeWindows:
+            def __init__(self):
+                self.searched = False
+                self.opened = False
+
+            def focus_chrome_tab_by_search(self, *args, **kwargs):
+                self.searched = True
+                return {"success": True, "verified": True, "reused_existing": True}
+
+            def open_url_in_chrome_profile(self, profile, url):
+                self.opened = True
+                return {
+                    "success": True,
+                    "verified": True,
+                    "created_new": True,
+                    "strategy": "chrome_new_tab_keyboard"
+                }
+
+        windows = FakeWindows()
+        agent = CommunicationAgent(windows=windows, bridge=FakeBridge())
+        result = agent.open_service("whatsapp", profile="main", force_new=True)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["created_new"])
+        self.assertFalse(windows.searched)
+        self.assertTrue(windows.opened)
 
     def test_folder_attachment_is_packaged_and_cleaned_after_send(self):
         class FakeWindows:
