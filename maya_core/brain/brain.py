@@ -42,6 +42,7 @@ class MayaBrain:
         self.tool_registry = default_tool_registry
         self.unified_context = unified_context
         self.personality = personality or PersonalityEngine()
+        self._last_communication_recipient: Optional[str] = None
         # Deterministic classifier reserved as emergency safety fallback
         self.fallback_classifier = DeterministicIntentClassifier()
 
@@ -86,6 +87,16 @@ class MayaBrain:
         }
 
         resolved = dict(arguments)
+
+        recipient = resolved.get("recipient")
+        if isinstance(recipient, str):
+            recipient_ref = recipient.strip().lower()
+            if recipient_ref in {
+                "him", "her", "them", "that contact", "this contact",
+                "that person", "this person", "that guy", "this guy"
+            } and self._last_communication_recipient:
+                resolved["recipient"] = self._last_communication_recipient
+
         for key, value in list(resolved.items()):
             if key not in path_keys or not isinstance(value, str):
                 continue
@@ -1135,6 +1146,7 @@ class MayaBrain:
             query = str(last_res.get("query") or (decision.arguments or {}).get("query") or "that contact")
             if last_res.get("success") and last_res.get("found"):
                 name = last_res.get("name") or query
+                self._last_communication_recipient = str(name)
                 phone = last_res.get("phone") or (last_res.get("record") or {}).get("phone")
                 jid = last_res.get("jid") or (last_res.get("record") or {}).get("jid")
                 record_type = last_res.get("type") or (last_res.get("record") or {}).get("type")
@@ -1158,6 +1170,7 @@ class MayaBrain:
             detail = str(last_res.get("detail_requested") or args.get("detail") or "").lower()
             if last_res.get("found"):
                 name = last_res.get("name") or query
+                self._last_communication_recipient = str(name)
                 record_type = last_res.get("type") or (last_res.get("record") or {}).get("type")
                 phone = last_res.get("phone") or (last_res.get("record") or {}).get("phone")
                 jid = last_res.get("jid") or (last_res.get("record") or {}).get("jid")
@@ -1206,6 +1219,8 @@ class MayaBrain:
 
         if tool_name == "read_communication_messages":
             recipient = str(last_res.get("recipient") or (decision.arguments or {}).get("recipient") or "that chat")
+            if recipient.lower() not in {"current chat", "current conversation", "that chat"}:
+                self._last_communication_recipient = recipient
             messages = last_res.get("messages") or []
             if not last_res.get("success"):
                 return f"I couldn't read the live WhatsApp chat for {recipient}: {last_res.get('error', 'unknown error')}"
