@@ -220,6 +220,10 @@ class ToolRegistry:
             "analyze_screen": lambda **kw: vision.analyze_screen(),
             "open_url": lambda url, **kw: browser.open_url(url),
             "search_web": lambda query, **kw: browser.search_web(query),
+            "lookup_communication_contact": lambda service="whatsapp", query="", **kw: communication.lookup_contact(
+                service=service,
+                query=query
+            ),
             "sync_communication_contacts": lambda service="whatsapp", profile="main", **kw: communication.sync_contacts(
                 service=service,
                 profile=profile
@@ -361,6 +365,18 @@ def build_default_tool_registry() -> ToolRegistry:
         category="security",
         parameters=[
             ToolParameter("limit", "integer", "Number of recent actions to fetch", required=False, default=15)
+        ],
+        permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="lookup_communication_contact",
+        description="Looks up a name in MAYA's private local WhatsApp/Telegram contact index without sending anything.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service, normally whatsapp", required=False, default="whatsapp"),
+            ToolParameter("query", "string", "Contact/chat name to look up", required=True)
         ],
         permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
         undo_available=False
