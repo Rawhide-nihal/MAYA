@@ -8,6 +8,7 @@ import mimetypes
 import os
 import json
 import re
+import unicodedata
 from difflib import SequenceMatcher
 from collections import deque
 from typing import Any, Deque, Dict, Optional, List
@@ -43,6 +44,48 @@ class CommunicationBridge:
     @staticmethod
     def _normalize_contact_name(value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+    @staticmethod
+    def _normalize_search_text(value: str) -> str:
+        raw = unicodedata.normalize("NFKD", str(value or ""))
+        raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+        raw = raw.casefold()
+        raw = re.sub(r"[^a-z0-9@.+]+", " ", raw)
+        return re.sub(r"\s+", " ", raw).strip()
+
+    @staticmethod
+    def _tokens(value: str) -> List[str]:
+        return [token for token in CommunicationBridge._normalize_search_text(value).split(" ") if token]
+
+    @staticmethod
+    def _levenshtein_distance(a: str, b: str) -> int:
+        if a == b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+        if len(a) > len(b):
+            a, b = b, a
+        previous = list(range(len(a) + 1))
+        for i, char_b in enumerate(b, start=1):
+            current = [i]
+            for j, char_a in enumerate(a, start=1):
+                insert_cost = current[j - 1] + 1
+                delete_cost = previous[j] + 1
+                replace_cost = previous[j - 1] + (char_a != char_b)
+                current.append(min(insert_cost, delete_cost, replace_cost))
+            previous = current
+        return previous[-1]
+
+    @staticmethod
+    def _ngrams(value: str, n: int = 3) -> set:
+        text = CommunicationBridge._normalize_search_text(value).replace(" ", "")
+        if not text:
+            return set()
+        if len(text) <= n:
+            return {text}
+        return {text[i:i+n] for i in range(len(text) - n + 1)}
 
     @staticmethod
     def _normalize_phone(value: str) -> str:
@@ -394,17 +437,25 @@ class CommunicationBridge:
         query: str,
         record_type: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Resolve a contact/group through several deterministic search structures:
+        exact hash maps, token inverted index, prefix index, substring scan,
+        trigram index, SequenceMatcher and Levenshtein edit distance.
+        """
         service_name = str(service or "").lower().strip()
-        normalized = self._normalize_contact_name(query)
+        normalized = self._normalize_search_text(query)
         phone_query = self._normalize_phone(query)
+        query_tokens = set(self._tokens(query))
+        query_grams = self._ngrams(query)
 
         with self._lock:
             records = [dict(v) for v in self._contacts.get(service_name, {}).values()]
 
         if record_type:
+            requested_type = str(record_type).lower().strip()
             records = [
                 r for r in records
-                if str(r.get("type") or "unknown").lower() == str(record_type).lower()
+                if str(r.get("type") or "unknown").lower() == requested_type
             ]
 
         if not normalized or not records:
@@ -414,149 +465,216 @@ class CommunicationBridge:
                 "query": query,
                 "service": service_name,
                 "suggestions": [],
+                "search_strategies": [],
             }
 
-        exact_matches = []
-        for record in records:
-            searchable = {
-                self._normalize_contact_name(record.get("name") or ""),
-                self._normalize_contact_name(record.get("jid") or ""),
-                self._normalize_contact_name(record.get("chat_id") or ""),
-                *{
-                    self._normalize_contact_name(alias)
-                    for alias in (record.get("aliases") or [])
-                },
-            }
+        exact_index: Dict[str, set] = {}
+        token_index: Dict[str, set] = {}
+        prefix_index: Dict[str, set] = {}
+        gram_index: Dict[str, set] = {}
+        record_terms: Dict[int, List[str]] = {}
+
+        def add_index(index: Dict[str, set], key: str, idx: int) -> None:
+            if key:
+                index.setdefault(key, set()).add(idx)
+
+        for idx, record in enumerate(records):
+            raw_terms = [
+                record.get("name") or "",
+                record.get("display_name") or "",
+                *(record.get("aliases") or []),
+                record.get("jid") or "",
+                record.get("chat_id") or "",
+            ]
+            phone = self._normalize_phone(record.get("phone") or "")
+            if phone:
+                raw_terms.append(phone)
+
+            terms = []
+            seen_terms = set()
+            for raw_term in raw_terms:
+                term = self._normalize_search_text(raw_term)
+                if not term or term in seen_terms:
+                    continue
+                seen_terms.add(term)
+                terms.append(term)
+                add_index(exact_index, term, idx)
+
+                for token in self._tokens(term):
+                    add_index(token_index, token, idx)
+                    for length in range(2, min(len(token), 14) + 1):
+                        add_index(prefix_index, token[:length], idx)
+
+                for gram in self._ngrams(term):
+                    add_index(gram_index, gram, idx)
+
+            record_terms[idx] = terms
+
+        strategies_used = []
+        candidate_ids = set()
+
+        if normalized in exact_index:
+            candidate_ids.update(exact_index[normalized])
+            strategies_used.append("exact_hash")
+
+        if phone_query:
+            phone_key = self._normalize_search_text(phone_query)
+            if phone_key in exact_index:
+                candidate_ids.update(exact_index[phone_key])
+                strategies_used.append("phone_hash")
+
+        if query_tokens:
+            token_sets = [token_index.get(token, set()) for token in query_tokens]
+            if token_sets and all(token_sets):
+                intersection = set.intersection(*token_sets)
+                if intersection:
+                    candidate_ids.update(intersection)
+                    strategies_used.append("token_inverted_index")
+            for token in query_tokens:
+                pref = prefix_index.get(token, set())
+                if pref:
+                    candidate_ids.update(pref)
+                    if "prefix_index" not in strategies_used:
+                        strategies_used.append("prefix_index")
+
+        if query_grams:
+            gram_hits: Dict[int, int] = {}
+            for gram in query_grams:
+                for idx in gram_index.get(gram, set()):
+                    gram_hits[idx] = gram_hits.get(idx, 0) + 1
+            if gram_hits:
+                max_hits = max(gram_hits.values())
+                cutoff = max(1, int(max_hits * 0.45))
+                candidate_ids.update(idx for idx, hits in gram_hits.items() if hits >= cutoff)
+                strategies_used.append("trigram_inverted_index")
+
+        for idx, terms in record_terms.items():
+            if any(normalized in term or term in normalized for term in terms):
+                candidate_ids.add(idx)
+                if "substring_scan" not in strategies_used:
+                    strategies_used.append("substring_scan")
+
+        if not candidate_ids:
+            candidate_ids = set(range(len(records)))
+            strategies_used.append("full_fuzzy_scan")
+
+        ranked = []
+        for idx in candidate_ids:
+            record = records[idx]
+            best = 0.0
+            best_strategy = "hybrid_fuzzy"
+
+            for term in record_terms.get(idx, []):
+                if term == normalized:
+                    score = 1.0
+                    strategy = "exact"
+                else:
+                    term_tokens = set(term.split())
+                    token_overlap = (
+                        len(query_tokens & term_tokens) / max(1, len(query_tokens | term_tokens))
+                        if query_tokens or term_tokens else 0.0
+                    )
+                    prefix = 1.0 if (
+                        len(normalized) >= 2 and (
+                            term.startswith(normalized) or normalized.startswith(term)
+                        )
+                    ) else 0.0
+                    substring = 1.0 if (
+                        len(normalized) >= 3 and (normalized in term or term in normalized)
+                    ) else 0.0
+                    seq = SequenceMatcher(None, normalized, term).ratio()
+                    distance = self._levenshtein_distance(normalized, term)
+                    edit = 1.0 - (distance / max(1, len(normalized), len(term)))
+                    term_grams = self._ngrams(term)
+                    gram = (
+                        len(query_grams & term_grams) / max(1, len(query_grams | term_grams))
+                        if query_grams or term_grams else 0.0
+                    )
+                    score = max(
+                        0.97 * prefix,
+                        0.95 * substring,
+                        0.94 * token_overlap,
+                        (0.40 * seq) + (0.35 * edit) + (0.15 * gram) + (0.10 * token_overlap),
+                    )
+                    strategy = "hybrid_fuzzy"
+
+                if score > best:
+                    best = score
+                    best_strategy = strategy
+
             record_phone = self._normalize_phone(record.get("phone") or "")
-            if normalized in searchable or (phone_query and record_phone == phone_query):
-                exact_matches.append(record)
+            if phone_query and record_phone:
+                if record_phone == phone_query:
+                    best = max(best, 1.0)
+                    best_strategy = "phone_exact"
+                elif len(phone_query) >= 7 and record_phone.endswith(phone_query):
+                    best = max(best, 0.97)
+                    best_strategy = "phone_suffix"
 
-        if len(exact_matches) == 1:
-            record = exact_matches[0]
+            if best >= 0.52:
+                ranked.append((best, best_strategy, record))
+
+        ranked.sort(
+            key=lambda item: (
+                item[0],
+                float(item[2].get("last_seen", 0) or 0),
+            ),
+            reverse=True,
+        )
+
+        def compact(record: Dict[str, Any], score: float, strategy: str) -> Dict[str, Any]:
+            return {
+                "name": record.get("name"),
+                "type": record.get("type"),
+                "phone": record.get("phone"),
+                "jid": record.get("jid"),
+                "score": round(score, 3),
+                "strategy": strategy,
+            }
+
+        if not ranked:
+            return {
+                "matched": False,
+                "ambiguous": False,
+                "query": query,
+                "service": service_name,
+                "suggestions": [],
+                "search_strategies": strategies_used,
+            }
+
+        top_score, top_strategy, top = ranked[0]
+        second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+        margin = top_score - second_score
+        confident = (
+            top_score >= 0.985
+            or (top_score >= 0.90 and margin >= 0.035)
+            or (top_score >= 0.84 and margin >= 0.10)
+        )
+
+        if confident:
             return {
                 "matched": True,
                 "ambiguous": False,
                 "query": query,
                 "service": service_name,
-                "name": record.get("name"),
-                "record": record,
-                "resolution": "exact_local_record",
-                "score": 1.0,
-            }
-
-        if len(exact_matches) > 1:
-            return {
-                "matched": False,
-                "ambiguous": True,
-                "query": query,
-                "service": service_name,
-                "suggestions": [
-                    {
-                        "name": r.get("name"),
-                        "type": r.get("type"),
-                        "phone": r.get("phone"),
-                        "jid": r.get("jid"),
-                    }
-                    for r in exact_matches[:8]
-                ],
-            }
-
-        contains = []
-        for record in records:
-            names = [
-                self._normalize_contact_name(record.get("name") or ""),
-                *[
-                    self._normalize_contact_name(a)
-                    for a in (record.get("aliases") or [])
-                ],
-            ]
-            if any(normalized in name or name in normalized for name in names if name):
-                contains.append(record)
-
-        if len(contains) == 1:
-            record = contains[0]
-            return {
-                "matched": True,
-                "ambiguous": False,
-                "query": query,
-                "service": service_name,
-                "name": record.get("name"),
-                "record": record,
-                "resolution": "unique_local_substring",
-                "score": 0.95,
-            }
-
-        if len(contains) > 1:
-            return {
-                "matched": False,
-                "ambiguous": True,
-                "query": query,
-                "service": service_name,
-                "suggestions": [
-                    {
-                        "name": r.get("name"),
-                        "type": r.get("type"),
-                        "phone": r.get("phone"),
-                        "jid": r.get("jid"),
-                    }
-                    for r in contains[:8]
-                ],
-            }
-
-        scored = []
-        for record in records:
-            candidates = [
-                self._normalize_contact_name(record.get("name") or ""),
-                *[
-                    self._normalize_contact_name(a)
-                    for a in (record.get("aliases") or [])
-                ],
-            ]
-            score = max(
-                [SequenceMatcher(None, normalized, candidate).ratio() for candidate in candidates if candidate]
-                or [0.0]
-            )
-            if score >= 0.84:
-                scored.append((score, record))
-
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        if scored:
-            top_score, top = scored[0]
-            second_score = scored[1][0] if len(scored) > 1 else 0.0
-            if top_score >= 0.88 and (top_score - second_score) >= 0.08:
-                return {
-                    "matched": True,
-                    "ambiguous": False,
-                    "query": query,
-                    "service": service_name,
-                    "name": top.get("name"),
-                    "record": top,
-                    "resolution": "unique_local_fuzzy",
-                    "score": round(top_score, 3),
-                }
-
-            return {
-                "matched": False,
-                "ambiguous": True,
-                "query": query,
-                "service": service_name,
-                "suggestions": [
-                    {
-                        "name": record.get("name"),
-                        "type": record.get("type"),
-                        "phone": record.get("phone"),
-                        "jid": record.get("jid"),
-                    }
-                    for _, record in scored[:8]
-                ],
+                "name": top.get("name"),
+                "record": top,
+                "resolution": f"multi_search:{top_strategy}",
+                "score": round(top_score, 3),
+                "search_strategies": strategies_used,
+                "runner_up_score": round(second_score, 3) if len(ranked) > 1 else None,
             }
 
         return {
             "matched": False,
-            "ambiguous": False,
+            "ambiguous": True,
             "query": query,
             "service": service_name,
-            "suggestions": [],
+            "suggestions": [
+                compact(record, score, strategy)
+                for score, strategy, record in ranked[:10]
+            ],
+            "search_strategies": strategies_used,
         }
 
     def heartbeat(self) -> None:
