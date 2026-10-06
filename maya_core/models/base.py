@@ -312,8 +312,8 @@ class DeterministicIntentClassifier:
             detail = "phone" if re.search(r"\b(?:phone|number)\b", cleaned, flags=re.IGNORECASE) else "all"
             return {
                 "intent": "INFORMATION_REQUEST",
-                "tool": "lookup_communication_contact",
-                "arguments": {"service": "whatsapp", "query": query, "detail": detail},
+                "tool": "inspect_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query, "record_type": "contact", "profile": "main"},
                 "confidence": 0.995,
                 "summary": f"Get stored WhatsApp {detail} details for {query}"
             }
@@ -328,8 +328,8 @@ class DeterministicIntentClassifier:
             detail = "phone" if "number" in detail_text.lower() or "phone" in detail_text.lower() else "all"
             return {
                 "intent": "INFORMATION_REQUEST",
-                "tool": "lookup_communication_contact",
-                "arguments": {"service": "whatsapp", "query": query.strip(), "detail": detail},
+                "tool": "inspect_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query.strip(), "record_type": "contact", "profile": "main"},
                 "confidence": 0.99,
                 "summary": f"Get stored WhatsApp {detail} details for {query.strip()}"
             }
@@ -344,8 +344,8 @@ class DeterministicIntentClassifier:
             query = contact_number_from_contacts.group(1).strip()
             return {
                 "intent": "INFORMATION_REQUEST",
-                "tool": "lookup_communication_contact",
-                "arguments": {"service": "whatsapp", "query": query, "detail": "phone"},
+                "tool": "inspect_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query, "record_type": "contact", "profile": "main"},
                 "confidence": 0.995,
                 "summary": f"Get stored WhatsApp phone number for {query}"
             }
