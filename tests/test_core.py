@@ -233,6 +233,49 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r21["arguments"]["service"], "whatsapp")
         self.assertEqual(r21["arguments"]["query"], "Niteesh")
 
+        r22 = self.classifier.classify_and_extract("Open WhatsApp")
+        self.assertEqual(r22["tool"], "open_communication_service")
+        self.assertFalse(r22["arguments"]["force_new"])
+
+        r23 = self.classifier.classify_and_extract("Open WhatsApp in a new tab")
+        self.assertEqual(r23["tool"], "open_communication_service")
+        self.assertTrue(r23["arguments"]["force_new"])
+
+        r24 = self.classifier.classify_and_extract("Open Chrome in a new window")
+        self.assertEqual(r24["tool"], "open_application")
+        self.assertTrue(r24["arguments"]["force_new"])
+
+        r25 = self.classifier.classify_and_extract("Give Niteesh number")
+        self.assertEqual(r25["tool"], "inspect_communication_contact")
+        self.assertEqual(r25["arguments"]["query"], "Niteesh")
+
+        r26 = self.classifier.classify_and_extract("Find group Project Team")
+        self.assertEqual(r26["tool"], "lookup_communication_contact")
+        self.assertEqual(r26["arguments"]["record_type"], "group")
+
+        r27 = self.classifier.classify_and_extract("Read the latest message from Niteesh")
+        self.assertEqual(r27["tool"], "read_communication_messages")
+        self.assertEqual(r27["arguments"]["recipient"], "Niteesh")
+        self.assertEqual(r27["arguments"]["limit"], 1)
+
+        r28 = self.classifier.classify_and_extract("Read last 3 WhatsApp messages from Project Team")
+        self.assertEqual(r28["tool"], "read_communication_messages")
+        self.assertEqual(r28["arguments"]["limit"], 3)
+
+        r29 = self.classifier.classify_and_extract(
+            "Read the latest message from Niteesh and reply saying I'll call in 10 minutes"
+        )
+        self.assertEqual(r29["tool"], "read_and_reply_communication")
+        self.assertEqual(r29["arguments"]["recipient"], "Niteesh")
+        self.assertIn("10 minutes", r29["arguments"]["message"])
+
+        r30 = self.classifier.classify_and_extract(
+            r"Send folder D:\Projects\Demo to Niteesh on WhatsApp"
+        )
+        self.assertEqual(r30["tool"], "send_communication")
+        self.assertEqual(r30["arguments"]["recipient"], "Niteesh")
+        self.assertTrue(r30["arguments"]["attachment_path"].endswith(r"Projects\Demo"))
+
         self.assertFalse(
             self.brain.is_fast_conversation("Maya, sync my WhatsApp contacts.")
         )
@@ -259,6 +302,23 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertFalse(p_send.granted)
         self.assertTrue(p_send.requires_confirmation)
         self.assertEqual(p_send.required_level, PermissionLevel.LEVEL_3_MODIFICATION)
+
+        read_reply_args = {
+            "service": "whatsapp",
+            "recipient": "Niteesh",
+            "message": "I'll call in 10 minutes",
+            "profile": "main"
+        }
+        p_read_reply = self.permissions.check_permission(
+            "read_and_reply_communication",
+            read_reply_args
+        )
+        self.assertFalse(p_read_reply.granted)
+        self.assertTrue(p_read_reply.requires_confirmation)
+        self.assertEqual(
+            p_read_reply.required_level,
+            PermissionLevel.LEVEL_3_MODIFICATION
+        )
 
         # Level 4 critical action must require confirmation
         p_crit = self.permissions.check_permission("delete_file", {"filepath": "important.txt"})
@@ -518,6 +578,11 @@ class TestMayaPhase2Core(unittest.TestCase):
 
         self.assertIsNotNone(default_tool_registry.get("lookup_communication_contact"))
 
+        self.assertIsNotNone(default_tool_registry.get("inspect_communication_contact"))
+        self.assertIsNotNone(default_tool_registry.get("read_communication_messages"))
+        self.assertIsNotNone(default_tool_registry.get("open_communication_service"))
+        self.assertIsNotNone(default_tool_registry.get("read_and_reply_communication"))
+
         # Verify argument validation
         valid, err = default_tool_registry.validate_call("open_application", {"application": "VS Code"})
         self.assertTrue(valid)
@@ -593,6 +658,108 @@ class TestMayaPhase2Core(unittest.TestCase):
             str(attachment.resolve())
         )
 
+    def test_whatsapp_contact_records_upsert_details_groups_without_duplicates(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "rich_contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+
+        first = bridge.update_contacts(
+            "whatsapp",
+            [{"name": "Niteesh", "type": "unknown"}],
+            source="names_only"
+        )
+        self.assertEqual(first["total"], 1)
+
+        richer = bridge.update_contacts(
+            "whatsapp",
+            [{
+                "name": "Niteesh",
+                "jid": "919876543210@s.whatsapp.net",
+                "type": "contact"
+            }],
+            source="structured_sync"
+        )
+        self.assertEqual(richer["total"], 1)
+        self.assertGreaterEqual(richer["merged_duplicates"], 1)
+
+        niteesh = bridge.resolve_contact("whatsapp", "Niteesh")
+        self.assertTrue(niteesh["matched"])
+        self.assertEqual(niteesh["record"]["phone"], "919876543210")
+        self.assertEqual(niteesh["record"]["type"], "contact")
+
+        group_sync = bridge.update_contacts(
+            "whatsapp",
+            [{
+                "name": "Project Team",
+                "jid": "120363012345678901@g.us",
+                "type": "group"
+            }],
+            source="chat_sidebar"
+        )
+        self.assertEqual(group_sync["total"], 2)
+        self.assertEqual(group_sync["groups_total"], 1)
+
+        group = bridge.resolve_contact(
+            "whatsapp",
+            "Project Team",
+            record_type="group"
+        )
+        self.assertTrue(group["matched"])
+        self.assertEqual(group["record"]["type"], "group")
+        self.assertIsNone(group["record"]["phone"])
+
+        repeat = bridge.update_contacts(
+            "whatsapp",
+            [{
+                "name": "Project Team",
+                "jid": "120363012345678901@g.us",
+                "type": "group"
+            }],
+            source="manual_resync"
+        )
+        self.assertEqual(repeat["total"], 2)
+        self.assertEqual(len(bridge.list_contacts("whatsapp", limit=5000)), 2)
+
+        saved = json.loads(bridge._contacts_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["_meta"]["schema_version"], 2)
+
+    def test_browser_action_queue_round_trip(self):
+        bridge = CommunicationBridge()
+        holder = {}
+
+        def submit():
+            holder["result"] = bridge.submit_browser_action({
+                "type": "focus_service",
+                "service": "whatsapp",
+                "url": "https://web.whatsapp.com/",
+                "force_new": False,
+            }, timeout=2.0)
+
+        worker = threading.Thread(target=submit, daemon=True)
+        worker.start()
+
+        action = None
+        for _ in range(20):
+            action = bridge.next_browser_action()
+            if action:
+                break
+            time.sleep(0.02)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action["service"], "whatsapp")
+        self.assertFalse(action["force_new"])
+
+        bridge.complete_browser_action(action["action_id"], {
+            "success": True,
+            "verified": True,
+            "reused_existing": True,
+            "tab_id": 42,
+        })
+        worker.join(timeout=1.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder["result"]["success"])
+        self.assertTrue(holder["result"]["reused_existing"])
+
     def test_whatsapp_contact_index_exact_fuzzy_and_ambiguous_resolution(self):
         bridge = CommunicationBridge()
         bridge._contacts_path = Path(self.temp_dir.name) / "contacts.json"
@@ -618,6 +785,34 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertFalse(ambiguous["matched"])
         self.assertTrue(ambiguous["ambiguous"])
         self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
+
+    def test_open_application_reuses_existing_unless_force_new(self):
+        from unittest.mock import patch, MagicMock
+
+        agent = WindowsAgent()
+
+        with patch.object(agent, "is_application_running", return_value=True), \
+             patch.object(agent, "focus_application", return_value={
+                 "success": True,
+                 "verified": True,
+                 "hwnd": 77,
+                 "title": "Notepad"
+             }), \
+             patch.object(agent, "find_application_path") as find_path:
+            reused = agent.launch_application("Notepad")
+        self.assertTrue(reused["success"])
+        self.assertTrue(reused["reused_existing"])
+        find_path.assert_not_called()
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 99
+        fake_proc.poll.return_value = None
+        with patch.object(agent, "find_application_path", return_value=r"C:\Windows\notepad.exe"), \
+             patch.object(agent, "_wait_for_application", return_value=True), \
+             patch("agents.windows.agent.subprocess.Popen", return_value=fake_proc):
+            fresh = agent.launch_application("Notepad", force_new=True)
+        self.assertTrue(fresh["success"])
+        self.assertFalse(fresh.get("reused_existing", False))
 
     def test_windows_application_aliases_and_launcher_handoff(self):
         from unittest.mock import patch, MagicMock
@@ -714,6 +909,90 @@ class TestMayaPhase2Core(unittest.TestCase):
                 os.environ.pop("MAYA_SCREENSHOT_DIR", None)
             else:
                 os.environ["MAYA_SCREENSHOT_DIR"] = original
+
+    def test_folder_attachment_is_packaged_and_cleaned_after_send(self):
+        class FakeWindows:
+            def launch_application(self, *args, **kwargs):
+                return {"success": True, "verified": True, "profile_name": "Main"}
+
+        class FakeBridge:
+            def __init__(self):
+                self.command = None
+
+            def resolve_contact(self, service, recipient, record_type=None):
+                return {"matched": False, "ambiguous": False}
+
+            def submit_browser_action(self, action, timeout=6.0):
+                return {
+                    "success": True,
+                    "verified": True,
+                    "tab_id": 5,
+                    "reused_existing": True,
+                }
+
+            def submit(self, command, timeout=30.0):
+                self.command = dict(command)
+                self.assert_file_exists = os.path.isfile(command["attachment_path"])
+                return {
+                    "success": True,
+                    "verified": True,
+                    "sent": True,
+                }
+
+        folder = Path(self.temp_dir.name) / "folder_to_send"
+        folder.mkdir()
+        (folder / "note.txt").write_text("hello", encoding="utf-8")
+
+        fake_bridge = FakeBridge()
+        agent = CommunicationAgent(windows=FakeWindows(), bridge=fake_bridge)
+        result = agent.send(
+            service="whatsapp",
+            recipient="Niteesh",
+            message="",
+            profile="main",
+            attachment_path=str(folder),
+        )
+        self.assertTrue(result["success"])
+        self.assertTrue(result["folder_packaged_as_zip"])
+        self.assertTrue(fake_bridge.assert_file_exists)
+        self.assertTrue(fake_bridge.command["attachment_path"].endswith(".zip"))
+        self.assertFalse(os.path.exists(fake_bridge.command["attachment_path"]))
+
+    def test_live_message_result_is_sanitized_in_persistent_ledger(self):
+        original = self.planner.communication.read_messages
+        try:
+            self.planner.communication.read_messages = lambda **kwargs: {
+                "success": True,
+                "verified": True,
+                "service": "whatsapp",
+                "recipient": "Niteesh",
+                "count": 1,
+                "live_read": True,
+                "messages": [{
+                    "text": "private incoming message",
+                    "direction": "incoming"
+                }],
+                "latest": {
+                    "text": "private incoming message",
+                    "direction": "incoming"
+                }
+            }
+            result = self.planner.execute_tool(
+                "read_communication_messages",
+                {
+                    "service": "whatsapp",
+                    "recipient": "Niteesh",
+                    "limit": 1,
+                    "profile": "main"
+                }
+            )
+            self.assertTrue(result["success"])
+            latest_record = self.ledger.get_recent_actions(limit=1)[0]
+            serialized = json.dumps(latest_record.get("result", {}))
+            self.assertNotIn("private incoming message", serialized)
+            self.assertEqual(latest_record["result"]["count"], 1)
+        finally:
+            self.planner.communication.read_messages = original
 
     def test_contact_lookup_and_grounded_followup_status(self):
         bridge = CommunicationBridge()
