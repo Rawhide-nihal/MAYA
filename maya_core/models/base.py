@@ -411,7 +411,8 @@ class DeterministicIntentClassifier:
                     "service": "whatsapp",
                     "recipient": recipient,
                     "limit": max(1, min(int(count_text or 1), 20)),
-                    "profile": "main"
+                    "profile": "main",
+                    "incoming_only": True
                 },
                 "confidence": 0.995,
                 "summary": f"Read latest WhatsApp message(s) from {recipient}"
@@ -431,7 +432,8 @@ class DeterministicIntentClassifier:
                     "service": "whatsapp",
                     "recipient": recipient,
                     "limit": 1,
-                    "profile": "main"
+                    "profile": "main",
+                    "incoming_only": True
                 },
                 "confidence": 0.99,
                 "summary": f"Read latest WhatsApp message from {recipient}"
