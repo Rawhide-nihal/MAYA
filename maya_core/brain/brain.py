@@ -996,7 +996,18 @@ class MayaBrain:
                 f"{pending_step.get('description', '')}"
             )
 
-            if pending_tool == "send_communication":
+            if pending_tool == "read_and_reply_communication":
+                service = str(pending_args.get("service", "whatsapp")).title()
+                recipient = str(pending_args.get("recipient", ""))
+                message = str(pending_args.get("message", ""))
+                preview = message if len(message) <= 240 else message[:237] + "..."
+                confirmation_reply = (
+                    f"Ready to read the latest {service} message from {recipient} and send this reply:\n"
+                    f"Reply: {preview}\n\n"
+                    "Authorize once to read and send exactly this reply."
+                )
+
+            elif pending_tool == "send_communication":
                 service = str(pending_args.get("service", "message")).title()
                 recipient = pending_args.get("recipient", "")
                 message = str(pending_args.get("message", ""))
@@ -1205,6 +1216,20 @@ class MayaBrain:
                     return f"{service} was already open, Boss. I brought that existing tab to the front."
                 return f"Opened a new {service} tab, Boss."
             return f"I couldn't open {service}: {last_res.get('error', 'unknown error')}"
+
+        if tool_name == "read_and_reply_communication":
+            recipient = str(last_res.get("recipient") or (decision.arguments or {}).get("recipient") or "that chat")
+            if not last_res.get("success") or not last_res.get("verified"):
+                return f"I couldn't complete the live read-and-reply for {recipient}: {last_res.get('error', 'the send could not be verified')}"
+            latest = last_res.get("latest_read") or {}
+            latest_text = str(latest.get("text") or "").strip()
+            reply_text = str(last_res.get("reply_message") or (decision.arguments or {}).get("message") or "").strip()
+            if latest_text:
+                return (
+                    f"Done, Boss. I read the latest visible message from {recipient}: “{latest_text}” "
+                    f"and sent your verified reply: “{reply_text}”."
+                )
+            return f"Done, Boss. I verified the reply to {recipient} was sent: “{reply_text}”."
 
         if tool_name == "open_file":
             return (
