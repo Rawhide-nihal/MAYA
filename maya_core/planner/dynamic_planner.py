@@ -840,6 +840,34 @@ class DynamicTaskPlanner:
             else:
                 summary = f"Did not find {query} in the local {service.title()} contact index"
 
+        elif tool_name == "read_communication_messages":
+            service = arguments.get("service", "whatsapp")
+            recipient = arguments.get("recipient", "")
+            result = self.communication.read_messages(
+                recipient=recipient,
+                limit=arguments.get("limit", 1),
+                service=service,
+                profile=arguments.get("profile", "main"),
+            )
+            summary = (
+                f"Read {result.get('count', 0)} live {service.title()} message(s) from {recipient}"
+                if result.get("success")
+                else f"Failed to read live {service.title()} messages from {recipient}"
+            )
+
+        elif tool_name == "open_communication_service":
+            service = arguments.get("service", "whatsapp")
+            result = self.communication.open_service(
+                service=service,
+                profile=arguments.get("profile", "main"),
+                force_new=bool(arguments.get("force_new", False)),
+            )
+            summary = (
+                f"Opened {service.title()} using {'a new tab' if result.get('created_new') else 'the existing tab'}"
+                if result.get("success")
+                else f"Failed to open {service.title()}"
+            )
+
         elif tool_name == "sync_communication_contacts":
             service = arguments.get("service", "whatsapp")
             result = self.communication.sync_contacts(
