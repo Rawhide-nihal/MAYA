@@ -451,6 +451,82 @@
       null;
   }
 
+  function searchNormalize(value) {
+    return String(value || '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function levenshtein(a, b) {
+    a = searchNormalize(a);
+    b = searchNormalize(b);
+    if (a === b) return 0;
+    if (!a) return b.length;
+    if (!b) return a.length;
+    if (a.length > b.length) [a, b] = [b, a];
+
+    let previous = Array.from({ length: a.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= b.length; i += 1) {
+      const current = [i];
+      for (let j = 1; j <= a.length; j += 1) {
+        current[j] = Math.min(
+          current[j - 1] + 1,
+          previous[j] + 1,
+          previous[j - 1] + (a[j - 1] === b[i - 1] ? 0 : 1)
+        );
+      }
+      previous = current;
+    }
+    return previous[a.length];
+  }
+
+  function contactSimilarity(query, candidate) {
+    const q = searchNormalize(query);
+    const c = searchNormalize(candidate);
+    if (!q || !c) return 0;
+    if (q === c) return 1;
+
+    const prefix = c.startsWith(q) || q.startsWith(c) ? 0.96 : 0;
+    const substring = (q.length >= 3 && (c.includes(q) || q.includes(c))) ? 0.94 : 0;
+
+    const qTokens = new Set(q.split(' ').filter(Boolean));
+    const cTokens = new Set(c.split(' ').filter(Boolean));
+    const intersection = [...qTokens].filter(token => cTokens.has(token)).length;
+    const union = new Set([...qTokens, ...cTokens]).size || 1;
+    const tokenScore = (intersection / union) * 0.93;
+
+    const distance = levenshtein(q, c);
+    const editScore = 1 - (distance / Math.max(q.length, c.length, 1));
+
+    // Small LCS-ish proxy using character bigrams.
+    const bigrams = value => {
+      const flat = value.replace(/\s+/g, '');
+      const out = new Set();
+      if (flat.length <= 2) {
+        if (flat) out.add(flat);
+        return out;
+      }
+      for (let i = 0; i < flat.length - 1; i += 1) out.add(flat.slice(i, i + 2));
+      return out;
+    };
+    const qBi = bigrams(q);
+    const cBi = bigrams(c);
+    const biIntersection = [...qBi].filter(x => cBi.has(x)).length;
+    const biUnion = new Set([...qBi, ...cBi]).size || 1;
+    const bigramScore = biIntersection / biUnion;
+
+    return Math.max(
+      prefix,
+      substring,
+      tokenScore,
+      (0.72 * editScore) + (0.28 * bigramScore)
+    );
+  }
+
   async function selectContact(recipient) {
     const search = await M.waitFor(findSearchBox, 12000);
     if (!search) return { ok: false, error: 'WhatsApp search field was not found.' };
@@ -458,33 +534,77 @@
     if (search instanceof HTMLInputElement) M.setInputValue(search, recipient);
     else M.setEditableText(search, recipient);
 
-    await M.sleep(900);
+    await M.sleep(1100);
     const resultPane = document.querySelector('#pane-side') || document;
-    const target = M.normalize(recipient);
-    const titled = Array.from(resultPane.querySelectorAll('[title]'))
+    const allTitled = Array.from(resultPane.querySelectorAll('[title]'))
       .filter(M.visible)
-      .filter(el => M.normalize(el.getAttribute('title')) === target);
+      .filter(el => cleanContactName(el.getAttribute('title')));
 
-    const rows = Array.from(new Set(
-      titled.map(el => el.closest('[role="listitem"], [role="button"], div[tabindex="-1"]') || el)
-    ));
+    const candidates = [];
+    const seenRows = new Set();
+
+    for (const el of allTitled) {
+      const row = el.closest('[role="listitem"], [role="button"], div[tabindex="-1"]') || el;
+      if (seenRows.has(row)) continue;
+      seenRows.add(row);
+
+      const record = contactRecordFromElement(el);
+      if (!record?.name) continue;
+      candidates.push({
+        row,
+        record,
+        score: contactSimilarity(recipient, record.name)
+      });
+    }
 
     reportContacts(
-      titled.map(el => contactRecordFromElement(el)).filter(Boolean),
-      'whatsapp_search'
+      candidates.map(item => item.record),
+      'whatsapp_live_search'
     );
 
-    if (rows.length !== 1) {
+    candidates.sort((a, b) => b.score - a.score);
+    const exact = candidates.filter(item => searchNormalize(item.record.name) === searchNormalize(recipient));
+
+    if (exact.length === 1) {
+      exact[0].row.click();
       return {
-        ok: false,
-        error: rows.length === 0
-          ? `No exact WhatsApp contact named “${recipient}” was found.`
-          : `Multiple WhatsApp matches exist for “${recipient}”. MAYA refused to guess.`
+        ok: true,
+        matched_name: exact[0].record.name,
+        score: 1,
+        strategy: 'live_exact'
       };
     }
 
-    rows[0].click();
-    return { ok: true };
+    const top = candidates[0] || null;
+    const second = candidates[1] || null;
+    const margin = top ? top.score - (second?.score || 0) : 0;
+
+    if (top && (
+      top.score >= 0.965 ||
+      (top.score >= 0.86 && margin >= 0.07) ||
+      (top.score >= 0.80 && margin >= 0.14)
+    )) {
+      top.row.click();
+      return {
+        ok: true,
+        matched_name: top.record.name,
+        score: Number(top.score.toFixed(3)),
+        strategy: 'live_hybrid_fuzzy'
+      };
+    }
+
+    return {
+      ok: false,
+      ambiguous: candidates.length > 0,
+      suggestions: candidates.slice(0, 6).map(item => ({
+        name: item.record.name,
+        type: item.record.type,
+        score: Number(item.score.toFixed(3))
+      })),
+      error: candidates.length === 0
+        ? `WhatsApp returned no searchable contact/group result for “${recipient}”.`
+        : `I found possible WhatsApp matches for “${recipient}”, but none was safely unique enough to select automatically.`
+    };
   }
 
   function findMessageScrollContainer() {
