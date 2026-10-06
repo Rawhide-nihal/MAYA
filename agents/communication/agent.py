@@ -116,6 +116,7 @@ class CommunicationAgent:
         limit: int = 1,
         service: str = "whatsapp",
         profile: Optional[str] = "main",
+        incoming_only: bool = False,
     ) -> Dict[str, Any]:
         service_name = self._normalize_service(service)
         if service_name != "whatsapp":
@@ -168,6 +169,7 @@ class CommunicationAgent:
             "attachment_path": None,
             "target_tab_id": opened.get("tab_id"),
             "limit": max(1, min(int(limit or 1), 20)),
+            "incoming_only": bool(incoming_only),
         }, timeout=25.0)
         result.setdefault("service", "whatsapp")
         result.setdefault("recipient", recipient_text)
@@ -576,6 +578,7 @@ class CommunicationAgent:
             limit=1,
             service=service,
             profile=profile,
+            incoming_only=True,
         )
         if not live.get("success") or not live.get("verified"):
             return {
