@@ -349,6 +349,36 @@ def voice_ptt():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # MAYA Browser Bridge: authenticated extension command exchange
+@app.route("/api/browser/action/next", methods=["GET"])
+def browser_action_next():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify({"action": communication_bridge.next_browser_action()})
+
+
+@app.route("/api/browser/action/result", methods=["POST"])
+def browser_action_result():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    action_id = str(data.get("action_id", "")).strip()
+    if not action_id:
+        return jsonify({"success": False, "error": "action_id is required"}), 400
+
+    ok = communication_bridge.complete_browser_action(
+        action_id,
+        data.get("result") or {
+            "success": False,
+            "verified": False,
+            "error": "Empty browser action result.",
+        }
+    )
+    return jsonify({"success": ok}), (200 if ok else 404)
+
+
 @app.route("/api/communication/next", methods=["GET"])
 def communication_next():
     req_token = request.headers.get("X-Maya-Token", "").strip()
