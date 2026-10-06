@@ -5,8 +5,10 @@ Hardware Telemetry, and Model Runtime.
 """
 import os
 import gc
+import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -127,10 +129,10 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r5["arguments"]["message"], "I'll be there at 6")
 
         r6 = self.classifier.classify_and_extract("Open WhatsApp in Chrome")
-        self.assertEqual(r6["tool"], "open_application")
-        self.assertEqual(r6["arguments"]["application"], "Google Chrome")
+        self.assertEqual(r6["tool"], "open_communication_service")
+        self.assertEqual(r6["arguments"]["service"], "whatsapp")
         self.assertEqual(r6["arguments"]["profile"], "main")
-        self.assertIn("web.whatsapp.com", r6["arguments"]["path"])
+        self.assertFalse(r6["arguments"]["force_new"])
 
         r7 = self.classifier.classify_and_extract(
             "Send Rahul a WhatsApp message saying I fixed it"
