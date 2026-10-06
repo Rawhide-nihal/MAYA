@@ -719,10 +719,17 @@
     if (command.action === 'inspect_contact') {
       const selected = await selectContact(recipient);
       if (!selected.ok) {
-        return { success: false, verified: false, error: selected.error };
+        return {
+          success: false,
+          verified: false,
+          error: selected.error,
+          ambiguous: Boolean(selected.ambiguous),
+          suggestions: selected.suggestions || [],
+          search_strategy: 'live_hybrid_fuzzy'
+        };
       }
       await M.sleep(500);
-      const record = await inspectCurrentContact(recipient);
+      const record = await inspectCurrentContact(selected.matched_name || recipient);
       return {
         success: Boolean(record?.name),
         verified: Boolean(record?.name),
@@ -737,7 +744,14 @@
       if (!useCurrent) {
         const selected = await selectContact(recipient);
         if (!selected.ok) {
-          return { success: false, verified: false, error: selected.error };
+          return {
+            success: false,
+            verified: false,
+            error: selected.error,
+            ambiguous: Boolean(selected.ambiguous),
+            suggestions: selected.suggestions || [],
+            search_strategy: 'live_hybrid_fuzzy'
+          };
         }
         await M.sleep(500);
       }
@@ -774,7 +788,14 @@
     if (!useCurrentChat) {
       const selected = await selectContact(recipient);
       if (!selected.ok) {
-        return { success: false, verified: false, error: selected.error };
+        return {
+          success: false,
+          verified: false,
+          error: selected.error,
+          ambiguous: Boolean(selected.ambiguous),
+          suggestions: selected.suggestions || [],
+          search_strategy: 'live_hybrid_fuzzy'
+        };
       }
     } else {
       const currentComposer = await M.waitFor(findComposer, 5000);
