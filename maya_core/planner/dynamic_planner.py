@@ -867,6 +867,7 @@ class DynamicTaskPlanner:
                 limit=arguments.get("limit", 1),
                 service=service,
                 profile=arguments.get("profile", "main"),
+                incoming_only=bool(arguments.get("incoming_only", False)),
             )
             summary = (
                 f"Read {result.get('count', 0)} live {service.title()} message(s) from {recipient}"
