@@ -236,7 +236,12 @@ class DynamicTaskPlanner:
 
         plan = DynamicTaskPlan(plan_id=plan_id, goal=goal, state=PlanState.CREATED, steps=steps)
         self.active_plans[plan_id] = plan
-        self.emit("plan.created", {"plan_id": plan_id, "goal": goal, "total_steps": len(steps)})
+        self.emit("plan.created", {
+            "plan_id": plan_id,
+            "goal": goal,
+            "total_steps": len(steps),
+            "steps": [asdict(step) for step in steps],
+        })
         return plan
 
     def create_plan_from_neural(self, goal: str, decision: Any) -> DynamicTaskPlan:
@@ -295,7 +300,13 @@ class DynamicTaskPlanner:
             plan.active_step_index = idx
             step.state = StepState.RUNNING
             step.started_at = time.time()
-            self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "name": step.name})
+            self.emit("tool.started", {
+                "plan_id": plan.plan_id,
+                "step_id": step.step_id,
+                "tool": step.tool,
+                "name": step.name,
+                "description": step.description,
+            })
 
             # Execute tool with permission check
             tool_res = self.execute_tool(step.tool, step.arguments, token=permission_token, plan_id=plan.plan_id)
@@ -333,7 +344,13 @@ class DynamicTaskPlanner:
             executed_steps.append(asdict(step))
 
             if is_success:
-                self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool})
+                self.emit("tool.completed", {
+                    "plan_id": plan.plan_id,
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "name": step.name,
+                    "verified": is_verified,
+                })
             else:
                 self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "error": tool_res.get("error")})
                 if step.tool in self.NON_FATAL_FAILURE_TOOLS and idx < len(plan.steps) - 1:
