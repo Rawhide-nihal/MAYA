@@ -221,6 +221,12 @@ class ToolRegistry:
             "analyze_screen": lambda **kw: vision.analyze_screen(),
             "open_url": lambda url, **kw: browser.open_url(url),
             "search_web": lambda query, **kw: browser.search_web(query),
+            "inspect_communication_contact": lambda service="whatsapp", query="", profile="main", record_type=None, **kw: communication.inspect_contact(
+                service=service,
+                query=query,
+                profile=profile,
+                record_type=record_type
+            ),
             "lookup_communication_contact": lambda service="whatsapp", query="", detail=None, record_type=None, **kw: communication.lookup_contact(
                 service=service,
                 query=query,
@@ -387,6 +393,20 @@ def build_default_tool_registry() -> ToolRegistry:
             ToolParameter("limit", "integer", "Number of recent actions to fetch", required=False, default=15)
         ],
         permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="inspect_communication_contact",
+        description="Opens the exact WhatsApp contact/group live, inspects details exposed by WhatsApp Web, and enriches MAYA's private local record.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("query", "string", "Exact contact or group name", required=True),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main"),
+            ToolParameter("record_type", "string", "Optional filter: contact or group", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
         undo_available=False
     ))
 
