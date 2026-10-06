@@ -253,22 +253,140 @@ class DeterministicIntentClassifier:
                 "summary": f"Synchronize local {service.title()} contacts and chats"
             }
 
+        contact_detail = re.match(
+            r"^(?:(?:can|could|would)\s+(?:you|u)\s+)?"
+            r"(?:(?:give|tell|show|get)\s+(?:me\s+)?)?"
+            r"(?:(?:the\s+)?)"
+            r"(?:(?:phone\s+)?number|phone|details)\s+(?:of|for)\s+(.+?)[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if contact_detail:
+            query = contact_detail.group(1).strip()
+            detail = "phone" if re.search(r"\b(?:phone|number)\b", cleaned, flags=re.IGNORECASE) else "all"
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "lookup_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query, "detail": detail},
+                "confidence": 0.995,
+                "summary": f"Get stored WhatsApp {detail} details for {query}"
+            }
+
+        possessive_detail = re.match(
+            r"^(?:what(?:'s|\s+is)\s+)?(.+?)(?:'s|s')\s+(phone\s+number|number|details)[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if possessive_detail:
+            query, detail_text = possessive_detail.groups()
+            detail = "phone" if "number" in detail_text.lower() or "phone" in detail_text.lower() else "all"
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "lookup_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query.strip(), "detail": detail},
+                "confidence": 0.99,
+                "summary": f"Get stored WhatsApp {detail} details for {query.strip()}"
+            }
+
+        contact_number_from_contacts = re.match(
+            r"^(?:(?:can|could)\s+(?:you|u)\s+)?(?:get|give|find|tell)\s+(?:me\s+)?"
+            r"(.+?)\s+(?:phone\s+)?number\s+(?:from|in)\s+(?:my\s+)?(?:whatsapp\s+)?contacts[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if contact_number_from_contacts:
+            query = contact_number_from_contacts.group(1).strip()
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "lookup_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query, "detail": "phone"},
+                "confidence": 0.995,
+                "summary": f"Get stored WhatsApp phone number for {query}"
+            }
+
+        read_latest_messages = re.match(
+            r"^(?:read|show|get|check)\s+(?:me\s+)?(?:the\s+)?"
+            r"(?:latest|last|recent)\s*(?:(\d+)\s+)?(?:whatsapp\s+)?messages?"
+            r"\s+(?:from|of)\s+(.+?)(?:\s+on\s+whatsapp)?[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if read_latest_messages:
+            count_text, recipient = read_latest_messages.groups()
+            recipient = recipient.strip()
+            if recipient.lower() in {"this chat", "this contact", "this person", "him", "her"}:
+                recipient = "current chat"
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "read_communication_messages",
+                "arguments": {
+                    "service": "whatsapp",
+                    "recipient": recipient,
+                    "limit": max(1, min(int(count_text or 1), 20)),
+                    "profile": "main"
+                },
+                "confidence": 0.995,
+                "summary": f"Read latest WhatsApp message(s) from {recipient}"
+            }
+
+        what_did_contact_say = re.match(
+            r"^(?:what\s+did|what(?:'s|\s+is))\s+(.+?)\s+(?:say|send|message)(?:\s+me)?(?:\s+on\s+whatsapp)?[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if what_did_contact_say:
+            recipient = what_did_contact_say.group(1).strip()
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "read_communication_messages",
+                "arguments": {
+                    "service": "whatsapp",
+                    "recipient": recipient,
+                    "limit": 1,
+                    "profile": "main"
+                },
+                "confidence": 0.99,
+                "summary": f"Read latest WhatsApp message from {recipient}"
+            }
+
+        reply_message = re.match(
+            r"^(?:reply|respond)\s+(?:to\s+)?(?:the\s+latest\s+message\s+from\s+)?"
+            r"(.+?)(?:\s+on\s+whatsapp)?\s+(?:saying|with\s+(?:the\s+)?message|that)\s+(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if reply_message:
+            recipient, message = reply_message.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": "whatsapp",
+                    "recipient": recipient.strip(),
+                    "message": message.strip(),
+                    "profile": "main"
+                },
+                "confidence": 0.99,
+                "summary": f"Reply to {recipient.strip()} on WhatsApp"
+            }
+
         contact_lookup = re.match(
             r"^(?:(?:can|could|would)\s+(?:you|u)\s+)?"
             r"(?:find|lookup|look\s+up|search\s+for|check\s+for)\s+"
-            r"(?:(?:a|the)\s+)?(?:(whatsapp)\s+)?contact"
+            r"(?:(?:a|the)\s+)?(?:(whatsapp)\s+)?(contact|group)"
             r"(?:\s+(?:named|called))?\s+(.+?)[.!?]*$",
             cleaned,
             flags=re.IGNORECASE
         )
         if contact_lookup:
-            service, query = contact_lookup.groups()
+            service, record_kind, query = contact_lookup.groups()
             return {
                 "intent": "INFORMATION_REQUEST",
                 "tool": "lookup_communication_contact",
                 "arguments": {
                     "service": (service or "whatsapp").lower(),
-                    "query": query.strip()
+                    "query": query.strip(),
+                    "record_type": "group" if record_kind.lower() == "group" else "contact"
                 },
                 "confidence": 0.995,
                 "summary": f"Look up {query.strip()} in the local {(service or 'WhatsApp').title()} contact index"
@@ -396,28 +514,31 @@ class DeterministicIntentClassifier:
                 "summary": f"{verb} {service} message for {recipient.strip()}"
             }
 
-        # Open authenticated communication services in the user's main Chrome profile.
+        # Open authenticated communication services; reuse an existing tab by default.
         service_open = re.search(
-            r"\b(?:open|launch|start)\s+(?:my\s+)?(gmail|whatsapp|telegram)(?:\s+(?:in|on|from)\s+(?:google\s+)?chrome)?\b",
+            r"\b(?:open|launch|start)\s+(?:my\s+)?(gmail|whatsapp|telegram)"
+            r"(?:\s+(?:in|on|from)\s+(?:google\s+)?chrome)?\b",
             lower
         )
         if service_open:
             service = service_open.group(1)
-            urls = {
-                "gmail": "https://mail.google.com/mail/",
-                "whatsapp": "https://web.whatsapp.com/",
-                "telegram": "https://web.telegram.org/k/"
-            }
+            force_new = bool(re.search(
+                r"\b(?:new\s+(?:tab|window)|fresh(?:ly)?|newly|another\s+(?:tab|window))\b",
+                lower
+            ))
             return {
                 "intent": "PC_ACTION",
-                "tool": "open_application",
+                "tool": "open_communication_service",
                 "arguments": {
-                    "application": "Google Chrome",
+                    "service": service,
                     "profile": "main",
-                    "path": urls[service]
+                    "force_new": force_new
                 },
-                "confidence": 0.98,
-                "summary": f"Open {service.title()} in the main Chrome profile"
+                "confidence": 0.99,
+                "summary": (
+                    f"Open {service.title()} "
+                    + ("in a new browser tab" if force_new else "using the existing tab if available")
+                )
             }
 
         # Local file actions: exact session references and recent user files.
