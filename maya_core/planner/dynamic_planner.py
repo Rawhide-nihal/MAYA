@@ -809,6 +809,17 @@ class DynamicTaskPlanner:
             summary = f"Web search for '{arguments.get('query')}'"
 
         # Authenticated communication tools
+        elif tool_name == "lookup_communication_contact":
+            service = arguments.get("service", "whatsapp")
+            query = arguments.get("query", "")
+            result = self.communication.lookup_contact(service=service, query=query)
+            if result.get("found"):
+                summary = f"Found {result.get('name') or query} in the local {service.title()} contact index"
+            elif result.get("ambiguous"):
+                summary = f"Contact lookup for {query} was ambiguous"
+            else:
+                summary = f"Did not find {query} in the local {service.title()} contact index"
+
         elif tool_name == "sync_communication_contacts":
             service = arguments.get("service", "whatsapp")
             result = self.communication.sync_contacts(
