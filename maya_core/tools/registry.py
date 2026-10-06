@@ -233,11 +233,12 @@ class ToolRegistry:
                 detail=detail,
                 record_type=record_type
             ),
-            "read_communication_messages": lambda service="whatsapp", recipient="", limit=1, profile="main", **kw: communication.read_messages(
+            "read_communication_messages": lambda service="whatsapp", recipient="", limit=1, profile="main", incoming_only=False, **kw: communication.read_messages(
                 recipient=recipient,
                 limit=limit,
                 service=service,
-                profile=profile
+                profile=profile,
+                incoming_only=bool(incoming_only)
             ),
             "open_communication_service": lambda service="whatsapp", profile="main", force_new=False, **kw: communication.open_service(
                 service=service,
@@ -432,7 +433,8 @@ def build_default_tool_registry() -> ToolRegistry:
             ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
             ToolParameter("recipient", "string", "Exact synced contact/group name or 'current chat'", required=True),
             ToolParameter("limit", "integer", "Number of latest visible messages to read (1-20)", required=False, default=1),
-            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main"),
+            ToolParameter("incoming_only", "boolean", "When true, only return incoming message bubbles from the other party/group", required=False, default=False)
         ],
         permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
         undo_available=False
