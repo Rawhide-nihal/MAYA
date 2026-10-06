@@ -999,6 +999,27 @@ class DynamicTaskPlanner:
         # Action Ledger Recording
         action_id = str(uuid.uuid4())[:8]
         is_success = result.get("success", False)
+
+        ledger_result = result
+        if tool_name == "read_communication_messages":
+            ledger_result = {
+                "success": result.get("success", False),
+                "verified": result.get("verified", False),
+                "service": result.get("service"),
+                "recipient": result.get("recipient"),
+                "count": result.get("count", 0),
+                "live_read": result.get("live_read", False),
+            }
+        elif tool_name == "read_and_reply_communication":
+            ledger_result = {
+                "success": result.get("success", False),
+                "verified": result.get("verified", False),
+                "service": result.get("service"),
+                "recipient": result.get("recipient"),
+                "sent": result.get("sent", False),
+                "live_read_performed": bool(result.get("latest_read") or result.get("messages")),
+            }
+
         record = ActionRecord(
             action_id=action_id,
             plan_id=plan_id,
@@ -1006,7 +1027,7 @@ class DynamicTaskPlanner:
             arguments=arguments,
             affected_resources=affected_resources,
             previous_state=prev_state,
-            result=result,
+            result=ledger_result,
             verified=result.get("verified", is_success),
             undo_available=undo_available,
             status="success" if is_success else "failed",
