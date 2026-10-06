@@ -474,6 +474,7 @@ class CommunicationAgent:
             "profile": profile or "main",
             "attachment_path": None,
             "target_tab_id": opened.get("tab_id"),
+            "record_type": record_type,
         }, timeout=25.0)
 
         record = result.get("record") if isinstance(result, dict) else None
