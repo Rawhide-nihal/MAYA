@@ -245,14 +245,27 @@ class CommunicationBridge:
             pass
 
     def _save_contacts(self) -> None:
+        """Atomically persist the private local contact/group index."""
         try:
             self._contacts_path.parent.mkdir(parents=True, exist_ok=True)
-            self._contacts_path.write_text(
-                json.dumps(self._contacts, indent=2, ensure_ascii=False),
+            payload = dict(self._contacts)
+            payload["_meta"] = {
+                "schema_version": 2,
+                "updated_at": time.time(),
+            }
+            temp_path = self._contacts_path.with_suffix(".json.tmp")
+            temp_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
                 encoding="utf-8"
             )
+            os.replace(temp_path, self._contacts_path)
         except Exception:
-            pass
+            try:
+                temp_path = self._contacts_path.with_suffix(".json.tmp")
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
 
     def update_contacts(
         self,
