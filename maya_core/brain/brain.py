@@ -8,6 +8,7 @@ Deterministic Intent Classifier is maintained strictly as an emergency safety fa
 from typing import Dict, Any, Optional, List, Generator
 import time
 import json
+import re
 
 from maya_core.models.base import DeterministicIntentClassifier
 from maya_core.models.runtime import MayaModelRuntime, model_runtime
@@ -527,10 +528,137 @@ class MayaBrain:
 
         return None
 
+    def _is_grounded_followup_query(self, user_text: str) -> bool:
+        lower = re.sub(r"\s+", " ", (user_text or "").strip().lower())
+        return bool(
+            re.search(r"\b(?:did|have)\s+(?:you|u)\s+sync\b", lower)
+            or re.search(r"\b(?:are|were)\s+(?:the\s+)?(?:whatsapp\s+)?contacts\s+synced\b", lower)
+            or re.search(r"\bhow\s+many\s+(?:whatsapp\s+)?contacts\b", lower)
+            or re.search(r"\bdid\s+(?:you|u)\s+find\b", lower)
+            or re.search(r"\bhave\s+(?:you|u)\s+found\b", lower)
+            or re.search(r"\bfound\s+(?:it|him|her|the\s+contact)\b", lower)
+        )
+
+    def _handle_grounded_followup(self, user_text: str) -> Optional[Dict[str, Any]]:
+        """Answer action-status follow-ups only from verified ledger/contact state."""
+        if not self._is_grounded_followup_query(user_text):
+            return None
+
+        lower = re.sub(r"\s+", " ", (user_text or "").strip().lower())
+        recent = self.ledger.get_recent_actions(limit=20)
+        communication = getattr(self.planner, "communication", None)
+        bridge = getattr(communication, "bridge", None)
+
+        sync_query = bool(
+            re.search(r"\b(?:did|have)\s+(?:you|u)\s+sync\b", lower)
+            or re.search(r"\b(?:are|were)\s+(?:the\s+)?(?:whatsapp\s+)?contacts\s+synced\b", lower)
+            or re.search(r"\bhow\s+many\s+(?:whatsapp\s+)?contacts\b", lower)
+        )
+        if sync_query:
+            sync_action = next(
+                (a for a in recent if a.get("tool_name") == "sync_communication_contacts"),
+                None
+            )
+            contact_count = 0
+            if bridge is not None and hasattr(bridge, "list_contacts"):
+                try:
+                    contact_count = len(bridge.list_contacts("whatsapp"))
+                except Exception:
+                    contact_count = 0
+
+            if sync_action:
+                result = sync_action.get("result") or {}
+                verified_success = (
+                    sync_action.get("status") == "success"
+                    and bool(sync_action.get("verified"))
+                    and bool(result.get("success"))
+                )
+                if verified_success:
+                    reported = int(
+                        result.get("local_contact_count")
+                        or result.get("contacts_synced")
+                        or contact_count
+                        or 0
+                    )
+                    partial = bool(result.get("partial")) or result.get("complete") is False
+                    reply = (
+                        f"Yes, Boss. The last WhatsApp contact sync completed and I currently have "
+                        f"{contact_count or reported} contact/chat name(s) indexed locally."
+                    )
+                    if partial:
+                        reply += " WhatsApp did not expose the entire picker in that scan, so I’m marking it as partial rather than pretending it was complete."
+                else:
+                    err = result.get("error") or sync_action.get("summary") or "the sync did not verify successfully"
+                    reply = f"No, Boss. I do not have a verified successful WhatsApp sync. The last attempt reported: {err}"
+            elif contact_count:
+                reply = (
+                    f"I currently have {contact_count} WhatsApp contact/chat name(s) in the local index, Boss, "
+                    "but I do not have a verified explicit sync action in the ledger."
+                )
+            else:
+                reply = "No verified WhatsApp contact sync is recorded yet, Boss."
+
+            return {
+                "intent": "ACTION_STATUS",
+                "reply": reply,
+                "executed_tool": None,
+                "tasks": [],
+                "verified": True,
+                "details": {
+                    "contact_count": contact_count,
+                    "last_sync_action": sync_action,
+                },
+                "timestamp": time.time(),
+            }
+
+        lookup_action = next(
+            (a for a in recent if a.get("tool_name") == "lookup_communication_contact"),
+            None
+        )
+        if lookup_action:
+            result = lookup_action.get("result") or {}
+            query = str(result.get("query") or (lookup_action.get("arguments") or {}).get("query") or "that contact")
+            if result.get("found"):
+                name = result.get("name") or query
+                reply = f"Yep, Boss. I found {name} in your local WhatsApp contact index."
+            elif result.get("ambiguous"):
+                suggestions = [str(x) for x in (result.get("suggestions") or []) if x]
+                reply = f"I found multiple possible matches for {query}, Boss."
+                if suggestions:
+                    reply += " The closest matches are: " + ", ".join(suggestions[:6]) + "."
+            else:
+                reply = (
+                    f"No, Boss. I didn't find {query} in the currently synced WhatsApp contact index. "
+                    "That means either it isn't exposed by the current WhatsApp Web index or it hasn't been synced yet."
+                )
+
+            return {
+                "intent": "ACTION_STATUS",
+                "reply": reply,
+                "executed_tool": None,
+                "tasks": [],
+                "verified": True,
+                "details": {"last_lookup_action": lookup_action},
+                "timestamp": time.time(),
+            }
+
+        return {
+            "intent": "ACTION_STATUS",
+            "reply": "I don't have a verified contact lookup result to report yet, Boss.",
+            "executed_tool": None,
+            "tasks": [],
+            "verified": True,
+            "timestamp": time.time(),
+        }
+
     def is_fast_conversation(self, user_text: str) -> bool:
         """Return True only for ordinary conversation that does not map to an action/context command."""
         cleaned_query = (user_text or "").strip()
-        if not cleaned_query or self._is_context_command(cleaned_query):
+        if (
+            not cleaned_query
+            or self._is_context_command(cleaned_query)
+            or self._is_grounded_followup_query(cleaned_query)
+        ):
             return False
         intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
         return (
@@ -671,6 +799,12 @@ class MayaBrain:
         cleaned_query = user_text.strip()
         if not cleaned_query:
             return {"error": "Empty query"}
+
+        grounded_followup = self._handle_grounded_followup(cleaned_query)
+        if grounded_followup is not None:
+            self.memory.add_message("user", cleaned_query)
+            self.memory.add_message("maya", grounded_followup.get("reply", ""))
+            return grounded_followup
 
         direct_context = self._handle_context_command(cleaned_query)
         if direct_context is not None:
@@ -929,13 +1063,65 @@ class MayaBrain:
             err = f_step.get("result", {}).get("error", "Execution failed")
             return f"I ran into an issue while executing '{f_step.get('name')}': {err}"
 
-        # Build factual verification payload
         tool_name = decision.tool or "action"
+
+        # High-trust operational results should not be reinterpreted by the
+        # conversational model. Report the verified data directly.
+        if tool_name == "sync_communication_contacts":
+            count = int(
+                last_res.get("local_contact_count")
+                or last_res.get("contacts_synced")
+                or 0
+            )
+            partial = bool(last_res.get("partial")) or last_res.get("complete") is False
+            reply = f"WhatsApp contact sync finished, Boss. I have {count} contact/chat name(s) indexed locally."
+            if partial:
+                reply += " The scan was partial because WhatsApp Web did not expose the entire contact list."
+            else:
+                reply += " The scan reached the available end of the WhatsApp Web contact picker."
+            return reply
+
+        if tool_name == "lookup_communication_contact":
+            query = str(last_res.get("query") or (decision.arguments or {}).get("query") or "that contact")
+            if last_res.get("found"):
+                name = last_res.get("name") or query
+                return f"Found {name} in your local WhatsApp contact index, Boss."
+            if last_res.get("ambiguous"):
+                suggestions = [str(x) for x in (last_res.get("suggestions") or []) if x]
+                if suggestions:
+                    return (
+                        f"I found multiple possible matches for {query}, Boss: "
+                        + ", ".join(suggestions[:6])
+                        + ". Pick the exact one and I won't gamble with the wrong chat."
+                    )
+                return f"I found multiple possible matches for {query}, Boss, so I refused to guess."
+            return (
+                f"I couldn't find {query} in the currently synced WhatsApp contact index, Boss. "
+                "If you know the exact saved name, give me that—or run a fresh WhatsApp contact sync."
+            )
+
+        if tool_name == "open_file":
+            return (
+                f"Opened {last_res.get('name') or (decision.arguments or {}).get('filepath', 'the file')}, Boss."
+                if last_res.get("success")
+                else f"I couldn't open that file: {last_res.get('error', 'unknown error')}"
+            )
+
+        if tool_name == "copy_file_to_clipboard":
+            return (
+                f"{last_res.get('name') or 'The file'} is on the Windows file clipboard, Boss. Ctrl+V is ready."
+                if last_res.get("verified")
+                else f"I couldn't verify the file on the clipboard: {last_res.get('error', last_res.get('message', 'unknown error'))}"
+            )
+
+        # Build factual verification payload
         exec_payload = {
             "query": user_query,
             "tool": tool_name,
             "arguments": decision.arguments,
-            "verified": True,
+            "verified": bool(last_res.get("verified", last_res.get("success", False))),
+            "success": bool(last_res.get("success", True)),
+            "plan_state": plan_result.get("state"),
             "result_summary": last_res
         }
 
