@@ -202,6 +202,14 @@ class CommunicationAgent:
         expanded_attachment = None
         generated_archive = None
         original_attachment = None
+
+        def cleanup_generated_archive() -> None:
+            if generated_archive:
+                try:
+                    if os.path.exists(generated_archive):
+                        os.remove(generated_archive)
+                except OSError:
+                    pass
         if attachment_path:
             original_attachment = str(Path(attachment_path).expanduser().resolve())
             expanded_attachment = original_attachment
@@ -258,6 +266,7 @@ class CommunicationAgent:
             if resolved_contact.get("matched") and resolved_contact.get("name"):
                 recipient = str(resolved_contact["name"]).strip()
             elif resolved_contact.get("ambiguous"):
+                cleanup_generated_archive()
                 suggestions = [
                     (item.get("name") if isinstance(item, dict) else str(item))
                     for item in (resolved_contact.get("suggestions") or [])
@@ -285,6 +294,7 @@ class CommunicationAgent:
             target_tab_id = browser_context.get("tab_id")
 
             if not expected_host or active_host != expected_host or target_tab_id is None:
+                cleanup_generated_archive()
                 return {
                     "success": False,
                     "verified": False,
@@ -307,11 +317,7 @@ class CommunicationAgent:
                 force_new=False,
             )
             if not launch.get("success"):
-                if generated_archive:
-                    try:
-                        os.remove(generated_archive)
-                    except OSError:
-                        pass
+                cleanup_generated_archive()
                 return {
                     "success": False,
                     "verified": False,
@@ -330,7 +336,17 @@ class CommunicationAgent:
             "attachment_path": expanded_attachment,
             "target_tab_id": target_tab_id,
         }
-        result = self.bridge.submit(command, timeout=30.0)
+        try:
+            result = self.bridge.submit(command, timeout=30.0)
+        except Exception as exc:
+            result = {
+                "success": False,
+                "verified": False,
+                "error": f"Communication bridge failed: {exc}",
+            }
+        finally:
+            cleanup_generated_archive()
+
         result.setdefault("service", service_name)
         result.setdefault("recipient", recipient)
         result["chrome_profile"] = (
@@ -342,10 +358,6 @@ class CommunicationAgent:
             result["folder_packaged_as_zip"] = True
             result["original_attachment_path"] = original_attachment
             result["archive_name"] = os.path.basename(generated_archive)
-            try:
-                os.remove(generated_archive)
-            except OSError:
-                pass
         return result
 
     def inspect_contact(
