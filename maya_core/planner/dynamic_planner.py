@@ -829,6 +829,20 @@ class DynamicTaskPlanner:
             summary = f"Web search for '{arguments.get('query')}'"
 
         # Authenticated communication tools
+        elif tool_name == "inspect_communication_contact":
+            query = arguments.get("query", "")
+            result = self.communication.inspect_contact(
+                service=arguments.get("service", "whatsapp"),
+                query=query,
+                profile=arguments.get("profile", "main"),
+                record_type=arguments.get("record_type"),
+            )
+            summary = (
+                f"Inspected and enriched WhatsApp details for {result.get('name') or query}"
+                if result.get("success")
+                else f"Failed to inspect WhatsApp details for {query}"
+            )
+
         elif tool_name == "lookup_communication_contact":
             service = arguments.get("service", "whatsapp")
             query = arguments.get("query", "")
