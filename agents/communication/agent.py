@@ -85,24 +85,55 @@ class CommunicationAgent:
             browser_result["profile"] = profile or "main"
             return browser_result
 
-        # If the extension background is unavailable, use the configured Chrome
-        # profile as a fallback. Opening the URL requires a real launch dispatch.
-        try:
-            fallback = self.windows.launch_application(
-                "Google Chrome",
-                arguments=[SERVICE_URLS[service_name]],
-                profile=profile or "main",
-                force_new=True,
+        # Real-machine fallback: if the MV3 worker slept, search the exact Chrome
+        # profile's existing tabs before creating anything new.
+        if not force_new:
+            search_labels = {
+                "whatsapp": ("WhatsApp", "whatsapp"),
+                "gmail": ("Gmail", "gmail"),
+                "telegram": ("Telegram", "telegram"),
+            }
+            search_text, expected_title = search_labels[service_name]
+            focus_tab = getattr(self.windows, "focus_chrome_tab_by_search", None)
+            if callable(focus_tab):
+                tab_result = focus_tab(
+                    profile or "main",
+                    search_text,
+                    expected_title=expected_title,
+                )
+                if tab_result.get("success") and tab_result.get("verified"):
+                    tab_result.setdefault("service", service_name)
+                    tab_result["profile"] = profile or "main"
+                    tab_result["browser_bridge_fallback"] = True
+                    tab_result["browser_bridge_error"] = browser_result.get("error")
+                    return tab_result
+
+        # No verified existing service tab was found, or the user explicitly
+        # requested a new/fresh tab. Create one in the exact configured profile.
+        open_url = getattr(self.windows, "open_url_in_chrome_profile", None)
+        if callable(open_url):
+            fallback = open_url(
+                profile or "main",
+                SERVICE_URLS[service_name],
             )
-        except TypeError:
-            # Compatibility with narrow test/mocked Windows agents.
-            fallback = self.windows.launch_application(
-                "Google Chrome",
-                arguments=[SERVICE_URLS[service_name]],
-                profile=profile or "main",
-            )
+        else:
+            try:
+                fallback = self.windows.launch_application(
+                    "Google Chrome",
+                    arguments=[SERVICE_URLS[service_name]],
+                    profile=profile or "main",
+                    force_new=True,
+                )
+            except TypeError:
+                fallback = self.windows.launch_application(
+                    "Google Chrome",
+                    arguments=[SERVICE_URLS[service_name]],
+                    profile=profile or "main",
+                )
+
         fallback.setdefault("service", service_name)
         fallback["browser_bridge_fallback"] = True
+        fallback["browser_bridge_error"] = browser_result.get("error")
         if not fallback.get("success"):
             fallback.setdefault(
                 "error",
