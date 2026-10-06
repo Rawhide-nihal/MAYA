@@ -1040,6 +1040,174 @@ class WindowsAgent:
         except Exception as exc:
             return {"success": False, "verified": False, "error": str(exc)}
 
+    def focus_chrome_tab_by_search(
+        self,
+        profile_hint: str,
+        search_text: str,
+        expected_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Real Windows fallback for an already-open Chrome tab.
+
+        Uses Chrome's built-in Tab Search (Ctrl+Shift+A) after focusing the exact
+        configured profile window. This does not require the extension worker to
+        be awake.
+        """
+        if sys.platform != "win32":
+            return {"success": False, "verified": False, "error": "Chrome tab search fallback is Windows-only."}
+
+        profile = self.resolve_chrome_profile(profile_hint)
+        if not profile.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": profile.get("error", "Chrome profile could not be resolved."),
+            }
+
+        focused = self.focus_chrome_profile(profile["profile_directory"])
+        if not focused.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": focused.get("error", "Chrome profile is not currently open."),
+            }
+
+        try:
+            from pywinauto.keyboard import send_keys
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"pywinauto keyboard fallback unavailable: {exc}",
+            }
+
+        old_clipboard = None
+        try:
+            if HAS_CLIPBOARD:
+                try:
+                    old_clipboard = pyperclip.paste()
+                except Exception:
+                    old_clipboard = None
+
+            send_keys("^+a")
+            time.sleep(0.30)
+
+            if HAS_CLIPBOARD:
+                pyperclip.copy(str(search_text))
+                send_keys("^v")
+            else:
+                send_keys(str(search_text), with_spaces=True)
+
+            time.sleep(0.35)
+            send_keys("{ENTER}")
+            time.sleep(0.65)
+
+            hwnd = win32gui.GetForegroundWindow() if HAS_WIN32 else None
+            title = str(win32gui.GetWindowText(hwnd) or "") if hwnd else ""
+            expected = str(expected_title or search_text or "").strip().casefold()
+            verified = bool(title and (not expected or expected in title.casefold()))
+
+            return {
+                "success": verified,
+                "verified": verified,
+                "reused_existing": verified,
+                "focused": verified,
+                "title": title,
+                "hwnd": hwnd,
+                "profile_directory": profile.get("profile_directory"),
+                "profile_name": profile.get("profile_name"),
+                "strategy": "chrome_tab_search",
+                "error": None if verified else (
+                    f"Chrome Tab Search did not activate a verified '{search_text}' tab."
+                ),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Chrome Tab Search fallback failed: {exc}",
+            }
+        finally:
+            if HAS_CLIPBOARD and old_clipboard is not None:
+                try:
+                    pyperclip.copy(old_clipboard)
+                except Exception:
+                    pass
+
+    def open_url_in_chrome_profile(
+        self,
+        profile_hint: str,
+        url: str,
+    ) -> Dict[str, Any]:
+        """Open a URL in a new tab of the exact existing Chrome profile when possible."""
+        if sys.platform != "win32":
+            return {"success": False, "verified": False, "error": "Chrome URL fallback is Windows-only."}
+
+        profile = self.resolve_chrome_profile(profile_hint)
+        if not profile.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": profile.get("error", "Chrome profile could not be resolved."),
+            }
+
+        focused = self.focus_chrome_profile(profile["profile_directory"])
+        if not focused.get("success"):
+            # Chrome/profile is not running. Let the normal launcher start it.
+            launched = self.launch_application(
+                "Google Chrome",
+                arguments=[url],
+                profile=profile_hint,
+                force_new=True,
+            )
+            launched.setdefault("created_new", bool(launched.get("success")))
+            launched.setdefault("strategy", "chrome_process_launch")
+            return launched
+
+        try:
+            from pywinauto.keyboard import send_keys
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": f"pywinauto keyboard unavailable: {exc}"}
+
+        old_clipboard = None
+        try:
+            if HAS_CLIPBOARD:
+                try:
+                    old_clipboard = pyperclip.paste()
+                except Exception:
+                    old_clipboard = None
+
+            send_keys("^t")
+            time.sleep(0.20)
+            if HAS_CLIPBOARD:
+                pyperclip.copy(str(url))
+                send_keys("^v{ENTER}")
+            else:
+                send_keys(str(url), with_spaces=True)
+                send_keys("{ENTER}")
+            time.sleep(0.70)
+
+            hwnd = win32gui.GetForegroundWindow() if HAS_WIN32 else None
+            title = str(win32gui.GetWindowText(hwnd) or "") if hwnd else ""
+            return {
+                "success": True,
+                "verified": True,
+                "created_new": True,
+                "title": title,
+                "hwnd": hwnd,
+                "profile_directory": profile.get("profile_directory"),
+                "profile_name": profile.get("profile_name"),
+                "strategy": "chrome_new_tab_keyboard",
+            }
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": f"Could not open Chrome tab: {exc}"}
+        finally:
+            if HAS_CLIPBOARD and old_clipboard is not None:
+                try:
+                    pyperclip.copy(old_clipboard)
+                except Exception:
+                    pass
+
     def _wait_for_chrome_profile(self, profile_directory: str, timeout: float = 5.0) -> bool:
         deadline = time.time() + max(0.5, float(timeout))
         while time.time() < deadline:
