@@ -709,6 +709,7 @@ class CommunicationBridge:
                 "window_id": context.get("window_id"),
                 "tab_id": context.get("tab_id"),
                 "tab_count": context.get("tab_count"),
+                "extension_version": str(context.get("extension_version", ""))[:50],
                 "updated_at": time.time(),
             }
 
