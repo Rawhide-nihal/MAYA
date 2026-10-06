@@ -417,7 +417,7 @@ class UnifiedContextEngine:
             if record:
                 return {"kind": "screenshot", "value": record, "label": raw}
 
-        if any(word in raw for word in ["file", "document"]):
+        if any(word in raw for word in ["file", "folder", "document"]):
             snapshot = self.last_snapshot or self.snapshot(include_processes=False)
             active_process = str(snapshot.get("active_process") or "").lower()
             selected_files = snapshot.get("selected_files") or []
@@ -429,7 +429,7 @@ class UnifiedContextEngine:
                     "resolution": "active_explorer_selection",
                 }
 
-        if any(word in raw for word in ["attachment", "file", "document"]) and self.attachments:
+        if any(word in raw for word in ["attachment", "file", "folder", "document"]) and self.attachments:
             return {"kind": "attachment", "value": self.attachments[-1], "label": raw}
 
         # Generic pronouns refer to the most recently registered session entity,
