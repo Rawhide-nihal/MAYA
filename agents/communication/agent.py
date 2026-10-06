@@ -331,6 +331,103 @@ class CommunicationAgent:
                 pass
         return result
 
+    def inspect_contact(
+        self,
+        service: str = "whatsapp",
+        query: str = "",
+        profile: Optional[str] = "main",
+        record_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        service_name = self._normalize_service(service)
+        if service_name != "whatsapp":
+            return {
+                "success": False,
+                "verified": False,
+                "error": "Live contact inspection is currently implemented for WhatsApp Web.",
+            }
+
+        query_text = str(query or "").strip()
+        if not query_text:
+            return {"success": False, "verified": False, "error": "Contact or group name is required."}
+
+        local = self.bridge.resolve_contact(
+            service_name,
+            query_text,
+            record_type=record_type,
+        )
+        if local.get("ambiguous"):
+            return {
+                "success": False,
+                "verified": False,
+                "ambiguous": True,
+                "query": query_text,
+                "suggestions": local.get("suggestions") or [],
+                "error": f"Multiple WhatsApp records could match '{query_text}'.",
+            }
+
+        recipient = (
+            str((local.get("record") or {}).get("name") or local.get("name") or query_text)
+            if local.get("matched")
+            else query_text
+        )
+
+        opened = self.open_service("whatsapp", profile=profile, force_new=False)
+        if not opened.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": opened.get("error", "Could not open WhatsApp Web."),
+                "open_result": opened,
+            }
+
+        result = self.bridge.submit({
+            "service": "whatsapp",
+            "action": "inspect_contact",
+            "recipient": recipient,
+            "message": "",
+            "subject": "",
+            "profile": profile or "main",
+            "attachment_path": None,
+            "target_tab_id": opened.get("tab_id"),
+        }, timeout=25.0)
+
+        record = result.get("record") if isinstance(result, dict) else None
+        if result.get("success") and isinstance(record, dict) and record.get("name"):
+            self.bridge.update_contacts(
+                "whatsapp",
+                [record],
+                source="whatsapp_live_contact_inspection",
+            )
+            enriched = self.bridge.resolve_contact(
+                "whatsapp",
+                record.get("name") or query_text,
+                record_type=record_type,
+            )
+            merged_record = dict(enriched.get("record") or record)
+            return {
+                "success": True,
+                "verified": True,
+                "found": True,
+                "service": "whatsapp",
+                "query": query_text,
+                "name": merged_record.get("name") or query_text,
+                "record": merged_record,
+                "type": merged_record.get("type"),
+                "phone": merged_record.get("phone"),
+                "jid": merged_record.get("jid"),
+                "chat_id": merged_record.get("chat_id"),
+                "aliases": merged_record.get("aliases") or [],
+                "live_inspected": True,
+            }
+
+        return {
+            "success": False,
+            "verified": False,
+            "query": query_text,
+            "error": result.get("error", "WhatsApp did not expose contact details."),
+            "live_result": result,
+        }
+
     def lookup_contact(
         self,
         service: str = "whatsapp",
