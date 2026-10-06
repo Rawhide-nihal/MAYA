@@ -1108,7 +1108,12 @@ class MayaBrain:
                 or 0
             )
             partial = bool(last_res.get("partial")) or last_res.get("complete") is False
-            reply = f"WhatsApp contact sync finished, Boss. I have {count} contact/chat name(s) indexed locally."
+            group_count = int(last_res.get("local_group_count") or last_res.get("groups_synced") or 0)
+            typed_contacts = int(last_res.get("local_typed_contact_count") or last_res.get("typed_contacts_synced") or 0)
+            reply = f"WhatsApp sync finished, Boss. I have {count} unique contact/chat record(s) indexed locally"
+            if group_count or typed_contacts:
+                reply += f" — {typed_contacts} identified contact(s) and {group_count} group(s)"
+            reply += "."
             if partial:
                 reply += " The scan was partial because WhatsApp Web did not expose the entire contact list."
             else:
@@ -1116,12 +1121,45 @@ class MayaBrain:
             return reply
 
         if tool_name == "lookup_communication_contact":
-            query = str(last_res.get("query") or (decision.arguments or {}).get("query") or "that contact")
+            args = decision.arguments or {}
+            query = str(last_res.get("query") or args.get("query") or "that contact")
+            detail = str(last_res.get("detail_requested") or args.get("detail") or "").lower()
             if last_res.get("found"):
                 name = last_res.get("name") or query
-                return f"Found {name} in your local WhatsApp contact index, Boss."
+                record_type = last_res.get("type") or (last_res.get("record") or {}).get("type")
+                phone = last_res.get("phone") or (last_res.get("record") or {}).get("phone")
+                jid = last_res.get("jid") or (last_res.get("record") or {}).get("jid")
+
+                if detail == "phone":
+                    if phone:
+                        return f"{name}'s stored WhatsApp number is {phone}, Boss."
+                    suffix = f" I do have the WhatsApp chat ID {jid} stored." if jid else ""
+                    return (
+                        f"I found {name}, Boss, but WhatsApp Web has not exposed a phone number for that record."
+                        + suffix
+                    )
+
+                kind = f" {record_type}" if record_type in {"contact", "group"} else ""
+                details = []
+                if phone:
+                    details.append(f"number {phone}")
+                if jid:
+                    details.append(f"WhatsApp ID {jid}")
+                if details:
+                    return f"Found {name} as a WhatsApp{kind}, Boss. Stored details: " + ", ".join(details) + "."
+                return f"Found {name} as a WhatsApp{kind} in your local index, Boss."
+
             if last_res.get("ambiguous"):
-                suggestions = [str(x) for x in (last_res.get("suggestions") or []) if x]
+                suggestions = []
+                for item in (last_res.get("suggestions") or []):
+                    if isinstance(item, dict):
+                        label = str(item.get("name") or "").strip()
+                        if item.get("type"):
+                            label += f" ({item.get('type')})"
+                        if label:
+                            suggestions.append(label)
+                    elif item:
+                        suggestions.append(str(item))
                 if suggestions:
                     return (
                         f"I found multiple possible matches for {query}, Boss: "
@@ -1130,9 +1168,43 @@ class MayaBrain:
                     )
                 return f"I found multiple possible matches for {query}, Boss, so I refused to guess."
             return (
-                f"I couldn't find {query} in the currently synced WhatsApp contact index, Boss. "
-                "If you know the exact saved name, give me that—or run a fresh WhatsApp contact sync."
+                f"I couldn't find {query} in the currently synced WhatsApp index, Boss. "
+                "Run a fresh sync if the contact or group was added recently."
             )
+
+        if tool_name == "read_communication_messages":
+            recipient = str(last_res.get("recipient") or (decision.arguments or {}).get("recipient") or "that chat")
+            messages = last_res.get("messages") or []
+            if not last_res.get("success"):
+                return f"I couldn't read the live WhatsApp chat for {recipient}: {last_res.get('error', 'unknown error')}"
+            if not messages:
+                return f"I opened {recipient}, Boss, but there were no readable message bubbles exposed in the current WhatsApp view."
+
+            if len(messages) == 1:
+                msg = messages[-1]
+                direction = msg.get("direction")
+                prefix = "Latest incoming message" if direction == "incoming" else (
+                    "Latest outgoing message" if direction == "outgoing" else "Latest visible message"
+                )
+                stamp = f" [{msg.get('timestamp')}]" if msg.get("timestamp") else ""
+                sender = f" from {msg.get('sender')}" if msg.get("sender") else ""
+                return f"{prefix}{sender}{stamp}, Boss: “{msg.get('text', '')}”"
+
+            lines = []
+            for msg in messages:
+                direction = msg.get("direction") or "unknown"
+                sender = msg.get("sender") or direction
+                stamp = f" ({msg.get('timestamp')})" if msg.get("timestamp") else ""
+                lines.append(f"{sender}{stamp}: {msg.get('text', '')}")
+            return f"Here are the latest {len(messages)} visible messages from {recipient}, Boss:\n" + "\n".join(lines)
+
+        if tool_name == "open_communication_service":
+            service = str(last_res.get("service") or (decision.arguments or {}).get("service") or "service").title()
+            if last_res.get("success"):
+                if last_res.get("reused_existing"):
+                    return f"{service} was already open, Boss. I brought that existing tab to the front."
+                return f"Opened a new {service} tab, Boss."
+            return f"I couldn't open {service}: {last_res.get('error', 'unknown error')}"
 
         if tool_name == "open_file":
             return (
