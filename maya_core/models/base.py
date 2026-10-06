@@ -318,6 +318,26 @@ class DeterministicIntentClassifier:
                 "summary": f"Get stored WhatsApp {detail} details for {query}"
             }
 
+        direct_number_detail = re.match(
+            r"^(?:give|tell|show|get|find)\s+(?:me\s+)?(.+?)\s+(?:phone\s+)?number[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if direct_number_detail:
+            query = direct_number_detail.group(1).strip()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "inspect_communication_contact",
+                "arguments": {
+                    "service": "whatsapp",
+                    "query": query,
+                    "record_type": "contact",
+                    "profile": "main"
+                },
+                "confidence": 0.995,
+                "summary": f"Inspect WhatsApp contact details for {query}"
+            }
+
         possessive_detail = re.match(
             r"^(?:what(?:'s|\s+is)\s+)?(.+?)(?:'s|s')\s+(phone\s+number|number|details)[.!?]*$",
             cleaned,
