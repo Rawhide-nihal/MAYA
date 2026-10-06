@@ -219,7 +219,10 @@ class MayaBrain:
             "look at my screen", "check my screen", "look at this", "look at that",
             "what's on my screen", "what is on my screen", "what's this error",
             "what is this error", "read this page", "where should i click",
-            "what am i doing", "what's open", "what is open"
+            "what am i doing", "what's open", "what is open",
+            "text him from my side", "message him from my side",
+            "text her from my side", "message her from my side",
+            "text that contact", "message that contact"
         ]
         return any(p in lower for p in patterns)
 
@@ -235,6 +238,35 @@ class MayaBrain:
                 "intent": "MODE_CHANGE",
                 "reply": reply,
                 "mode": mode.value,
+                "executed_tool": None,
+                "tasks": [],
+                "verified": True,
+                "timestamp": time.time(),
+            }
+
+        no_message_pronoun = re.match(
+            r"^(?:(?:can|could|would)\s+(?:you|u)\s+)?"
+            r"(?:message|msg|text)\s+"
+            r"(him|her|them|that\s+contact|this\s+contact|that\s+person|this\s+person|that\s+guy|this\s+guy)"
+            r"(?:\s+from\s+my\s+side)?[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if no_message_pronoun:
+            if self._last_communication_recipient:
+                reply = (
+                    f"Sure, Boss. What do you want me to send to "
+                    f"{self._last_communication_recipient}?"
+                )
+            else:
+                reply = (
+                    "I can do that, Boss, but I don't have a verified contact reference "
+                    "for that pronoun yet. Tell me the contact or group name."
+                )
+            return {
+                "intent": "CLARIFICATION",
+                "reply": reply,
+                "requires_clarification": True,
                 "executed_tool": None,
                 "tasks": [],
                 "verified": True,
