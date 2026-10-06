@@ -38,6 +38,47 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOTS_DIR = MAYA_DATA_DIR / "screenshots"
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
+def get_user_screenshots_dir() -> Path:
+    """
+    Resolve the user's real Windows Pictures/Screenshots directory.
+
+    Priority:
+    1. Explicit MAYA_SCREENSHOT_DIR environment override.
+    2. OneDrive/OneDriveConsumer Pictures/Screenshots when available.
+    3. Standard ~/Pictures/Screenshots fallback.
+
+    This keeps screenshots visible in File Explorer like Win+PrintScreen rather
+    than hiding them inside MAYA's private AppData cache.
+    """
+    explicit = os.environ.get("MAYA_SCREENSHOT_DIR", "").strip()
+    if explicit:
+        target = Path(explicit).expanduser()
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    if sys.platform == "win32":
+        for env_name in ("OneDrive", "OneDriveConsumer"):
+            root = os.environ.get(env_name, "").strip()
+            if root:
+                target = Path(root) / "Pictures" / "Screenshots"
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                    return target
+                except OSError:
+                    pass
+
+        home_onedrive = Path.home() / "OneDrive" / "Pictures" / "Screenshots"
+        if (Path.home() / "OneDrive").exists():
+            try:
+                home_onedrive.mkdir(parents=True, exist_ok=True)
+                return home_onedrive
+            except OSError:
+                pass
+
+    fallback = Path.home() / "Pictures" / "Screenshots"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
 SETTINGS_FILE = MAYA_DATA_DIR / "settings.json"
 AUTH_TOKEN_FILE = MAYA_DATA_DIR / "auth.token"
 
@@ -57,7 +98,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "wake_word_enabled": True,
     "proactive_mode": "Normal",      # Quiet, Normal, Proactive
     "telemetry_enabled": False,
-    "theme": "dark-midnight"
+    "theme": "dark-midnight",
+    "chrome_main_account": "",       # Local-only email/profile hint for the user's primary Chrome profile
+    "chrome_main_profile": "",       # Optional local Chrome profile directory/name override
+    "maya_mode": "Normal",            # Normal, Work, Focus, Presentation, Savage
+    "screen_capture_privacy": "Always",
+    "context_clipboard_enabled": True,
+    "context_recent_files_enabled": True,
+    "attachment_max_mb": 75,
+    "communication_attachment_max_mb": 12
 }
 
 def get_or_create_auth_token() -> str:

@@ -124,6 +124,25 @@ export const MayaApi = {
     return await res.json();
   },
 
+  async uploadAttachment(file: File): Promise<any> {
+    const form = new FormData();
+    form.append('file', file);
+
+    const res = await fetch(`${API_BASE}/attachments`, {
+      method: 'POST',
+      headers: {
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: form
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.success === false) {
+      throw new Error(data?.error || `Attachment upload failed with HTTP ${res.status}`);
+    }
+    return data;
+  },
+
   async sendChatMessage(message: string, permissionToken?: string): Promise<ChatResponse> {
     const res = await fetch(`${API_BASE}/chat`, {
       method: 'POST',
@@ -134,6 +153,77 @@ export const MayaApi = {
       body: JSON.stringify({ message, permission_token: permissionToken })
     });
     return await res.json();
+  },
+
+  async sendChatMessageStream(
+    message: string,
+    permissionToken: string | undefined,
+    onToken: (delta: string) => void
+  ): Promise<ChatResponse> {
+    const res = await fetch(`${API_BASE}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionToken ? { 'X-Maya-Token': sessionToken } : {})
+      },
+      body: JSON.stringify({ message, permission_token: permissionToken })
+    });
+
+    if (!res.ok) {
+      let messageText = `Maya Core returned HTTP ${res.status}`;
+      try {
+        const data = await res.json();
+        if (data?.error) messageText = data.error;
+      } catch {
+        // Keep the HTTP status fallback.
+      }
+      throw new Error(messageText);
+    }
+
+    if (!res.body) {
+      throw new Error('Streaming response body is unavailable in this browser.');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResponse: ChatResponse | null = null;
+
+    const consumeLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const event = JSON.parse(trimmed);
+
+      if (event.type === 'token' && typeof event.delta === 'string') {
+        onToken(event.delta);
+      } else if (event.type === 'done' && event.result) {
+        finalResponse = event.result as ChatResponse;
+      } else if (event.type === 'error') {
+        throw new Error(event.error || 'Maya streaming failed.');
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+      let newlineIndex = buffer.indexOf('\n');
+      while (newlineIndex >= 0) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        consumeLine(line);
+        newlineIndex = buffer.indexOf('\n');
+      }
+
+      if (done) break;
+    }
+
+    if (buffer.trim()) consumeLine(buffer);
+
+    if (!finalResponse) {
+      throw new Error('Maya stream ended before a final response was received.');
+    }
+    return finalResponse;
   },
 
   async confirmAction(confirmation_id: string, approved: boolean): Promise<{ success: boolean; permission_token?: string }> {

@@ -52,19 +52,30 @@ export const App: React.FC = () => {
     const unsubscribe = MayaApi.subscribeToEvents((event, data) => {
       switch (event) {
         case 'maya.state':
+        case 'maya.state.changed': {
           if (data?.state) setCoreState(data.state);
           if (data?.sub_state) setSubState(data.sub_state);
-          if (data?.status_text) setStatusText(data.status_text);
-          break;
-
-        case 'maya.speaking.amplitude':
-          if (typeof data?.amplitude === 'number') {
-            setAudioAmplitude(data.amplitude);
+          if (data?.status_text) {
+            setStatusText(data.status_text);
+          } else if (data?.state) {
+            const fallbackStatus: Record<string, string> = {
+              IDLE: 'Ready for your command.',
+              THINKING: 'Thinking…',
+              PLANNING: 'Planning the next steps…',
+              EXECUTING: 'Working on it…',
+              VERIFYING: 'Verifying the result…',
+              SUCCESS: 'Verified and complete.',
+              WARNING: 'Attention required.',
+              ERROR: 'Something went wrong.'
+            };
+            setStatusText(fallbackStatus[data.state] || 'MAYA is working…');
           }
           break;
+        }
 
         case 'plan.created':
-          if (data?.steps) {
+        case 'task.plan.created':
+          if (Array.isArray(data?.steps)) {
             setActiveTasks(
               data.steps.map((s: any) => ({
                 id: s.step_id,
@@ -76,39 +87,79 @@ export const App: React.FC = () => {
               }))
             );
           }
+          setCoreState('PLANNING');
+          setStatusText(data?.goal ? `Planning: ${data.goal}` : 'Planning the next steps…');
           break;
 
         case 'plan.step.started':
+        case 'task.step.started':
+        case 'tool.started':
           setActiveTasks((prev) =>
             prev.map((t) =>
-              t.id === data?.step_id ? { ...t, state: 'RUNNING', description: data?.description || t.description } : t
+              t.id === data?.step_id
+                ? {
+                    ...t,
+                    state: 'RUNNING',
+                    description: data?.description || data?.name || t.description
+                  }
+                : t
             )
           );
           setCoreState('EXECUTING');
+          setStatusText(data?.name || data?.description || (data?.tool ? `Running ${data.tool}…` : 'Working on it…'));
           break;
 
         case 'plan.step.completed':
+        case 'task.step.completed':
+        case 'tool.completed':
           setActiveTasks((prev) =>
             prev.map((t) =>
-              t.id === data?.step_id ? { ...t, state: 'COMPLETED', verified: data?.verified ?? true } : t
+              t.id === data?.step_id
+                ? { ...t, state: 'COMPLETED', verified: data?.verified ?? true }
+                : t
             )
           );
+          setCoreState('VERIFYING');
+          setStatusText(data?.name ? `Verifying ${data.name}…` : 'Verifying the result…');
           break;
 
-        case 'plan.completed':
-          setActiveTasks((prev) =>
-            prev.map((t) => ({ ...t, state: 'COMPLETED', verified: true }))
-          );
-          setTimeout(() => setActiveTasks([]), 8000);
-          fetchTelemetry();
-          break;
-
-        case 'plan.failed':
+        case 'plan.step.failed':
+        case 'task.step.failed':
+        case 'tool.failed':
           setActiveTasks((prev) =>
             prev.map((t) =>
               t.id === data?.step_id ? { ...t, state: 'FAILED' } : t
             )
           );
+          setCoreState('ERROR');
+          setStatusText(data?.error || 'A task step failed.');
+          break;
+
+        case 'plan.completed':
+        case 'task.completed':
+          setActiveTasks((prev) =>
+            prev.map((t) => ({ ...t, state: 'COMPLETED', verified: true }))
+          );
+          setCoreState('SUCCESS');
+          setStatusText(data?.partial ? 'Finished with partial results.' : 'Verified and complete.');
+          setTimeout(() => {
+            setActiveTasks([]);
+            setCoreState('IDLE');
+            setStatusText('Ready for your command.');
+          }, 1800);
+          fetchTelemetry();
+          break;
+
+        case 'plan.failed':
+        case 'task.failed':
+          setCoreState('ERROR');
+          setStatusText(data?.error || 'The task failed.');
+          break;
+
+        case 'maya.speaking.amplitude':
+          if (typeof data?.amplitude === 'number') {
+            setAudioAmplitude(data.amplitude);
+          }
           break;
 
         case 'action.recorded':
@@ -119,6 +170,7 @@ export const App: React.FC = () => {
         default:
           break;
       }
+
     });
 
     return () => unsubscribe();
@@ -181,7 +233,8 @@ export const App: React.FC = () => {
 
         {/* Center Main Stage */}
         <main className="flex-1 flex flex-col h-full bg-[#070b14]/50 overflow-hidden relative">
-          {currentTab === 'chat' && (
+          {/* Keep ChatStage mounted so navigation never destroys an active conversation/stream. */}
+          <div className={currentTab === 'chat' ? 'flex flex-1 h-full overflow-hidden' : 'hidden'}>
             <ChatStage
               coreState={coreState}
               subState={subState}
@@ -190,7 +243,7 @@ export const App: React.FC = () => {
               onTasksUpdate={(tasks) => setActiveTasks(tasks)}
               onActionCompleted={fetchTelemetry}
             />
-          )}
+          </div>
           {currentTab === 'projects' && <ProjectsPage />}
           {currentTab === 'pc_control' && <PCControlPage />}
           {currentTab === 'memory' && <MemoryPage />}

@@ -9,7 +9,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from PIL import ImageGrab
-from maya_core.config import SCREENSHOTS_DIR
+from maya_core.config import SCREENSHOTS_DIR, get_user_screenshots_dir
+from agents.vision.ocr import windows_ocr
 
 try:
     import win32gui
@@ -27,7 +28,7 @@ except ImportError:
 
 class VisionAgent:
     def __init__(self, output_dir: Optional[Path] = None):
-        self.output_dir = output_dir or SCREENSHOTS_DIR
+        self.output_dir = output_dir or get_user_screenshots_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def check_privacy_permission(self) -> bool:
@@ -37,7 +38,7 @@ class VisionAgent:
         return privacy != "Never"
 
     def capture_screen(self, return_base64: bool = False) -> Dict[str, Any]:
-        """Captures primary display screen and records file metadata with privacy policy enforcement."""
+        """Capture the full Windows desktop and save a lossless PNG in the user's Screenshots folder."""
         if not self.check_privacy_permission():
             return {
                 "success": False,
@@ -47,7 +48,8 @@ class VisionAgent:
         try:
             screenshot = None
             try:
-                screenshot = ImageGrab.grab()
+                # Win+PrintScreen-style full desktop capture, including all monitors.
+                screenshot = ImageGrab.grab(all_screens=True)
             except Exception as grab_err:
                 return {
                     "success": False,
@@ -60,9 +62,12 @@ class VisionAgent:
                     "error": "Failed to capture desktop display: No active display surface detected."
                 }
 
-            timestamp = int(time.time())
-            filename = f"maya_screen_{timestamp}.png"
+            timestamp = time.time()
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(timestamp))
+            millis = int((timestamp % 1) * 1000)
+            filename = f"Screenshot_{stamp}_{millis:03d}.png"
             filepath = self.output_dir / filename
+            # PNG is lossless: no JPEG compression or quality reduction.
             screenshot.save(str(filepath), "PNG")
 
             # Calculate real image brightness & contrast
@@ -182,14 +187,44 @@ class VisionAgent:
                     "bbox": w["bbox"]
                 })
 
+        ocr = {"success": False, "available": False, "text": "", "lines": []}
+        screenshot_path = cap.get("filepath")
+        if screenshot_path:
+            try:
+                ocr = windows_ocr.recognize_file(screenshot_path)
+            except Exception:
+                pass
+
+        ocr_errors = []
+        if ocr.get("success") and ocr.get("text"):
+            for line in ocr.get("lines", []):
+                text = str(line.get("text", ""))
+                low = text.lower()
+                if any(term in low for term in [
+                    "error", "exception", "failed", "failure", "fatal",
+                    "warning", "traceback", "not responding"
+                ]):
+                    ocr_errors.append({
+                        "source": "windows_ocr",
+                        "text": text,
+                        "words": line.get("words", []),
+                        "severity": "CRITICAL" if any(term in low for term in ["fatal", "not responding"]) else "WARNING",
+                    })
+
         return {
-            "screenshot_path": cap.get("filepath"),
+            "screenshot_path": screenshot_path,
             "display_resolution": f"{cap.get('width', 1920)}x{cap.get('height', 1080)}",
             "active_window": active_win["title"] if active_win else "Desktop",
             "active_window_details": active_win,
             "total_windows_detected": len(windows),
             "elements": dialog_elements,
-            "visible_errors": visible_errors,
-            "scene_summary": f"Active: {active_win['title'] if active_win else 'Desktop'}. {len(dialog_elements)} alert dialog(s) found. {len(visible_errors)} visible errors detected."
+            "visible_errors": visible_errors + ocr_errors,
+            "ocr": ocr,
+            "scene_summary": (
+                f"Active: {active_win['title'] if active_win else 'Desktop'}. "
+                f"{len(dialog_elements)} alert dialog(s) found. "
+                f"{len(visible_errors) + len(ocr_errors)} visible error signal(s) detected. "
+                f"OCR text available: {bool(ocr.get('success') and ocr.get('text'))}."
+            )
         }
 

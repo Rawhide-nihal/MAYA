@@ -10,6 +10,7 @@ from memory.store import MemoryStore
 from security.audit.ledger import ActionLedger
 from agents.windows.agent import WindowsAgent
 from agents.developer.agent import DeveloperAgent
+from maya_core.personality.engine import PersonalityEngine
 
 class ContextBuilder:
     def __init__(
@@ -18,16 +19,72 @@ class ContextBuilder:
         ledger: ActionLedger,
         windows: WindowsAgent,
         developer: DeveloperAgent,
-        max_context_chars: int = 6000
+        max_context_chars: int = 6000,
+        unified_context=None,
+        personality: Optional[PersonalityEngine] = None
     ):
         self.memory = memory
         self.ledger = ledger
         self.windows = windows
         self.developer = developer
         self.max_context_chars = max_context_chars
+        self.unified_context = unified_context
+        self.personality = personality or PersonalityEngine()
+
+    def build_chat_context(self, user_query: str) -> Dict[str, Any]:
+        """Builds lightweight context for ordinary conversation without scanning the PC."""
+        relevant_mems = self.memory.search_relevant_memories(user_query, top_k=2)
+        history = self.memory.get_conversation_history(limit=7)
+        # process_request stores the current user message before building context;
+        # exclude that same message so it is not sent to the model twice.
+        if history and history[-1].get("role") == "user" and history[-1].get("message", "").strip() == user_query.strip():
+            history = history[:-1]
+        formatted_history = [
+            f"{h['role'].upper()}: {h['message']}"
+            for h in history[-4:]
+        ]
+
+        live_context = {}
+        if self.unified_context is not None:
+            try:
+                live_context = self.unified_context.snapshot(include_processes=False)
+            except Exception:
+                live_context = {}
+
+        prompt_parts = [MAYA_SYSTEM_PROMPT]
+        prompt_parts.append(self.personality.prompt_fragment(user_query, live_context))
+        if self.unified_context is not None:
+            try:
+                prompt_parts.append(self.unified_context.prompt_fragment(live_context))
+            except Exception:
+                pass
+        if relevant_mems:
+            prompt_parts.append("\nRELEVANT MEMORY:")
+            prompt_parts.extend(f"- {m}" for m in relevant_mems)
+        if formatted_history:
+            prompt_parts.append("\nRECENT CONVERSATION:")
+            prompt_parts.extend(formatted_history)
+
+        full_prompt = "\n".join(prompt_parts)
+        if len(full_prompt) > 3500:
+            head = "\n".join(prompt_parts[:2])
+            remaining = max(0, 3500 - len(head) - 2)
+            full_prompt = head + "\n" + full_prompt[-remaining:]
+
+        return {
+            "prompt": full_prompt,
+            "context_metadata": {
+                "mode": "conversation",
+                "relevant_memories": relevant_mems,
+                "conversation_history": formatted_history,
+                "live_context": live_context,
+                "personality_mode": self.personality.current_mode().value,
+                "response_depth": self.personality.response_depth(user_query).value,
+            },
+        }
 
     def build_context(self, user_query: str) -> Dict[str, Any]:
-        """Gathers active context elements and applies budgeting."""
+        """Gathers full agent context only for operational/tool requests."""
         # 1. Active project details
         proj_details = self.developer.detect_project_details()
 
@@ -42,13 +99,22 @@ class ContextBuilder:
         relevant_mems = self.memory.search_relevant_memories(user_query, top_k=3)
 
         # 5. Recent conversation turns
-        history = self.memory.get_conversation_history(limit=6)
+        history = self.memory.get_conversation_history(limit=7)
+        if history and history[-1].get("role") == "user" and history[-1].get("message", "").strip() == user_query.strip():
+            history = history[:-1]
         formatted_history = []
-        for h in history:
+        for h in history[-6:]:
             formatted_history.append(f"{h['role'].upper()}: {h['message']}")
 
         # 6. Working memory context
         last_error = self.memory.get_working_memory("last_error", None)
+
+        live_context = {}
+        if self.unified_context is not None:
+            try:
+                live_context = self.unified_context.snapshot(include_processes=True)
+            except Exception:
+                live_context = {}
 
         context_data = {
             "active_project": proj_details.get("project_name", "None"),
@@ -59,11 +125,19 @@ class ContextBuilder:
             "recent_actions": recent_action_summaries,
             "relevant_memories": relevant_mems,
             "conversation_history": formatted_history,
-            "last_error": last_error
+            "last_error": last_error,
+            "live_context": live_context
         }
 
         # 7. Format into prompt string with budget
+
         prompt_parts = [MAYA_SYSTEM_PROMPT]
+        prompt_parts.append(self.personality.prompt_fragment(user_query, live_context))
+        if self.unified_context is not None:
+            try:
+                prompt_parts.append(self.unified_context.prompt_fragment())
+            except Exception:
+                pass
         prompt_parts.append("\nACTIVE WORKSPACE CONTEXT:")
         prompt_parts.append(f"- Project: {context_data['active_project']} ({context_data['project_language']})")
         if context_data["recent_actions"]:
@@ -78,12 +152,15 @@ class ContextBuilder:
             for turn in formatted_history[-4:]:
                 prompt_parts.append(turn)
 
-        prompt_parts.append(f"\nUSER: {user_query}\nMAYA:")
+        # The user message is passed separately to the model runtime. Do not duplicate it here.
         full_prompt = "\n".join(prompt_parts)
 
         # Budget trimming if needed
         if len(full_prompt) > self.max_context_chars:
-            full_prompt = full_prompt[-self.max_context_chars:]
+            # Preserve system/personality instructions while trimming older context.
+            head = "\n".join(prompt_parts[:2])
+            remaining = max(0, self.max_context_chars - len(head) - 2)
+            full_prompt = head + "\n" + full_prompt[-remaining:]
 
         return {
             "prompt": full_prompt,

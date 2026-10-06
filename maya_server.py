@@ -14,7 +14,8 @@ import hmac
 import base64
 from urllib.parse import urlparse
 from pathlib import Path
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, stream_with_context, send_file
+from werkzeug.utils import secure_filename
 
 # Add repository root to Python path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,7 +33,12 @@ from agents.developer.agent import DeveloperAgent
 from agents.diagnostics.engine import DiagnosticEngine
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
+from agents.communication.bridge import communication_bridge
 from maya_core.context.builder import ContextBuilder
+from maya_core.context.engine import UnifiedContextEngine
+from maya_core.personality.engine import PersonalityEngine
+from maya_core.attachments.intelligence import AttachmentIntelligence
 from maya_core.planner.dynamic_planner import DynamicTaskPlanner
 from maya_core.brain.brain import MayaBrain
 from skills.registry import SkillsRegistry
@@ -72,15 +78,37 @@ developer = DeveloperAgent(terminal)
 diagnostics = DiagnosticEngine(terminal)
 vision = VisionAgent()
 browser = BrowserAgent()
+communication = CommunicationAgent(windows=windows, bridge=communication_bridge)
+personality = PersonalityEngine()
+unified_context = UnifiedContextEngine(
+    windows=windows,
+    vision=vision,
+    memory=memory,
+    ledger=ledger,
+    browser_context_source=communication_bridge
+)
+attachment_intelligence = AttachmentIntelligence()
 
 planner = DynamicTaskPlanner(
     permissions, ledger, memory, windows, terminal, filesystem,
-    developer, diagnostics, vision, browser, event_callback=dispatch_event
+    developer, diagnostics, vision, browser,
+    communication=communication,
+    unified_context=unified_context,
+    event_callback=dispatch_event
 )
 
 voice = VoiceEngine(event_emitter=dispatch_event)
-context_builder = ContextBuilder(memory, ledger, windows, developer)
-brain = MayaBrain(context_builder, planner, memory, permissions, ledger, runtime=model_runtime)
+context_builder = ContextBuilder(
+    memory, ledger, windows, developer,
+    unified_context=unified_context,
+    personality=personality
+)
+brain = MayaBrain(
+    context_builder, planner, memory, permissions, ledger,
+    runtime=model_runtime,
+    unified_context=unified_context,
+    personality=personality
+)
 skills = SkillsRegistry()
 
 # Security & Origin Validation
@@ -90,6 +118,7 @@ ALLOWED_EXACT_ORIGINS = {
     "http://localhost:5173",
     "vscode-webview://",
     "app://maya",
+    "chrome-extension://cbffklcgjeagclgldpkiflcbgbmjgohh",
     "null"
 }
 
@@ -165,11 +194,13 @@ def get_status():
     return jsonify({
         "status": "online",
         "maya_core": "Active",
-        "local_ai_ready": True,
+        "local_ai_ready": model_info.get("lifecycle_state") == "READY",
         "offline_only": settings.get("offline_only", True),
         "metrics": summary,
         "model": model_info,
-        "active_project": str(developer.active_project_path)
+        "active_project": str(developer.active_project_path),
+        "maya_mode": personality.current_mode().value,
+        "context_session_id": unified_context.session_id
     })
 
 # 3. Chat Pipeline
@@ -185,9 +216,64 @@ def handle_chat():
 
     # If voice is enabled and conversational, synthesize speech asynchronously
     if settings.get("voice_enabled") and not result.get("requires_confirmation"):
-        voice.speak(result.get("reply", ""))
+        threading.Thread(
+            target=voice.speak,
+            args=(result.get("reply", ""),),
+            daemon=True,
+        ).start()
 
     return jsonify(result)
+
+# 3b. Streaming Chat Pipeline
+@app.route("/api/chat/stream", methods=["POST"])
+def handle_chat_stream():
+    """Stream ordinary chat as NDJSON; keep tool requests on the validated planner path."""
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "").strip()
+    token = data.get("permission_token")
+    if not message:
+        return jsonify({"error": "No message provided"}), 400
+
+    @stream_with_context
+    def generate_events():
+        final_result = None
+        try:
+            if brain.is_fast_conversation(message):
+                for event in brain.stream_conversation(message):
+                    if event.get("type") == "done":
+                        final_result = event.get("result")
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            else:
+                final_result = brain.process_request(message, permission_token=token)
+                yield json.dumps(
+                    {"type": "done", "result": final_result},
+                    ensure_ascii=False
+                ) + "\n"
+
+            if (
+                settings.get("voice_enabled")
+                and final_result
+                and not final_result.get("requires_confirmation")
+                and final_result.get("reply")
+            ):
+                threading.Thread(
+                    target=voice.speak,
+                    args=(final_result.get("reply", ""),),
+                    daemon=True,
+                ).start()
+        except GeneratorExit:
+            return
+        except Exception as e:
+            print(f"[MAYA Server] Streaming chat error: {e}")
+            yield json.dumps(
+                {"type": "error", "error": str(e)},
+                ensure_ascii=False
+            ) + "\n"
+
+    response = Response(generate_events(), mimetype="application/x-ndjson")
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 # 4. Auth Bootstrap Endpoint
 @app.route("/api/auth/token", methods=["GET"])
@@ -251,13 +337,245 @@ def voice_ptt():
     if not audio_b64:
         return jsonify({"success": False, "error": "Missing audio_base64"}), 400
     try:
-        pcm_bytes = base64.b64decode(audio_b64)
-        amp = calculate_pcm_rms(pcm_bytes[:2048])
+        wav_bytes = base64.b64decode(audio_b64)
+        # Frontend sends a genuine 16-bit PCM WAV. Skip the 44-byte header
+        # when calculating visual amplitude.
+        pcm_preview = wav_bytes[44:2092] if wav_bytes[:4] == b"RIFF" else b""
+        amp = calculate_pcm_rms(pcm_preview)
         dispatch_event(VOICE_LISTENING_AMPLITUDE, {"amplitude": amp})
-        res = voice.process_ptt_audio(pcm_bytes)
+        res = voice.process_ptt_audio(wav_bytes)
         return jsonify(res)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+# MAYA Browser Bridge: authenticated extension command exchange
+@app.route("/api/browser/action/next", methods=["GET"])
+def browser_action_next():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify({"action": communication_bridge.next_browser_action()})
+
+
+@app.route("/api/browser/action/result", methods=["POST"])
+def browser_action_result():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    action_id = str(data.get("action_id", "")).strip()
+    if not action_id:
+        return jsonify({"success": False, "error": "action_id is required"}), 400
+
+    ok = communication_bridge.complete_browser_action(
+        action_id,
+        data.get("result") or {
+            "success": False,
+            "verified": False,
+            "error": "Empty browser action result.",
+        }
+    )
+    return jsonify({"success": ok}), (200 if ok else 404)
+
+
+@app.route("/api/communication/next", methods=["GET"])
+def communication_next():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "").strip().lower()
+    raw_tab_id = request.args.get("tab_id", "").strip()
+    try:
+        tab_id = int(raw_tab_id) if raw_tab_id else None
+    except ValueError:
+        tab_id = None
+    command = communication_bridge.next_command(service, tab_id=tab_id)
+    return jsonify({"command": command})
+
+
+@app.route("/api/communication/attachment/<command_id>", methods=["GET"])
+def communication_attachment(command_id: str):
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    attachment = communication_bridge.get_attachment(command_id)
+    if not attachment:
+        return jsonify({"error": "No attachment is available for this active command."}), 404
+
+    return send_file(
+        attachment["path"],
+        mimetype=attachment["mime_type"],
+        as_attachment=True,
+        download_name=attachment["name"],
+        conditional=True,
+    )
+
+
+@app.route("/api/communication/result", methods=["POST"])
+def communication_result():
+    data = request.get_json(silent=True) or {}
+    command_id = str(data.get("command_id", "")).strip()
+    result = data.get("result")
+    if not command_id or not isinstance(result, dict):
+        return jsonify({"success": False, "error": "command_id and result are required"}), 400
+
+    accepted = communication_bridge.complete(command_id, result)
+    return jsonify({"success": accepted})
+
+
+@app.route("/api/communication/contacts", methods=["POST"])
+def communication_contacts_update():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    service = str(data.get("service", "")).strip().lower()
+    contacts = data.get("contacts", [])
+    source = str(data.get("source", "browser")).strip() or "browser"
+    if not isinstance(contacts, list):
+        return jsonify({"success": False, "error": "contacts must be a list"}), 400
+
+    result = communication_bridge.update_contacts(service, contacts, source=source)
+    return jsonify(result), (200 if result.get("success") else 400)
+
+
+@app.route("/api/communication/contacts", methods=["GET"])
+def communication_contacts_list():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "whatsapp").strip().lower()
+    raw_limit = request.args.get("limit", "500")
+    try:
+        limit = max(1, min(int(raw_limit), 2000))
+    except ValueError:
+        limit = 500
+    contacts = communication_bridge.list_contacts(service, limit=limit)
+    return jsonify({
+        "success": True,
+        "service": service,
+        "count": len(contacts),
+        "contacts": contacts,
+    })
+
+
+@app.route("/api/communication/search", methods=["GET"])
+def communication_search():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "whatsapp").strip().lower()
+    query = request.args.get("q", "").strip()
+    record_type = request.args.get("type", "").strip().lower() or None
+    if not query:
+        return jsonify({"success": False, "error": "q is required"}), 400
+
+    result = communication_bridge.resolve_contact(
+        service,
+        query,
+        record_type=record_type,
+    )
+    return jsonify({
+        "success": True,
+        "service": service,
+        "query": query,
+        "result": result,
+    })
+
+
+@app.route("/api/communication/status", methods=["GET"])
+def communication_status():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(communication_bridge.status())
+
+
+# Unified Context / Attachments
+@app.route("/api/context", methods=["GET"])
+def get_unified_context():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(unified_context.session_summary())
+
+
+@app.route("/api/browser/context", methods=["POST"])
+def update_browser_context():
+    data = request.get_json(silent=True) or {}
+    communication_bridge.update_browser_context(data)
+    return jsonify({"success": True})
+
+
+@app.route("/api/browser/context", methods=["GET"])
+def get_browser_context():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(communication_bridge.get_browser_context())
+
+
+@app.route("/api/attachments", methods=["POST"])
+def upload_attachment():
+    max_mb = int(settings.get("attachment_max_mb", 75))
+    if request.content_length and request.content_length > max_mb * 1024 * 1024:
+        return jsonify({
+            "success": False,
+            "error": f"Attachment exceeds the configured {max_mb} MB limit."
+        }), 413
+
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False, "error": "No attachment file provided."}), 400
+
+    filename = secure_filename(upload.filename)
+    if not filename:
+        return jsonify({"success": False, "error": "Attachment filename is invalid."}), 400
+
+    attachment_dir = unified_context.session_dir / "attachments"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    target = attachment_dir / f"{int(time.time() * 1000)}_{filename}"
+    upload.save(str(target))
+
+    if target.stat().st_size > max_mb * 1024 * 1024:
+        try:
+            target.unlink()
+        except Exception:
+            pass
+        return jsonify({
+            "success": False,
+            "error": f"Attachment exceeds the configured {max_mb} MB limit."
+        }), 413
+
+    analysis = attachment_intelligence.analyze(str(target))
+    if not analysis.get("success"):
+        return jsonify(analysis), 400
+
+    # Keep the internal collision-safe path, but expose the original user-facing
+    # filename in conversation/context.
+    analysis["stored_name"] = target.name
+    analysis["name"] = filename
+
+    record = unified_context.register_attachment(analysis, label=filename)
+    dispatch_event("context.attachment.added", {
+        "id": record.get("id"),
+        "name": record.get("name"),
+        "type": record.get("type"),
+        "summary": record.get("summary")
+    })
+
+    response = dict(record)
+    context_text = str(response.get("context_text") or "")
+    if len(context_text) > 6000:
+        response["context_text"] = context_text[:6000] + "\n...[preview truncated]"
+    return jsonify(response)
+
 
 # 9. Action Ledger Activity
 @app.route("/api/activity", methods=["GET"])
@@ -323,6 +641,9 @@ def get_hw():
 
 def start_server(host="127.0.0.1", port=5000):
     print(f"Starting MAYA Core Server V2 on http://{host}:{port} ...")
+    # Warm the local model before the first real conversation. The server
+    # remains available while loading; /api/status reports readiness truthfully.
+    threading.Thread(target=model_runtime.manager.warm_up, daemon=True).start()
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":

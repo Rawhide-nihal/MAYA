@@ -10,7 +10,8 @@ import {
   AlertTriangle,
   ShieldAlert,
   X,
-  Play
+  Play,
+  Loader2
 } from 'lucide-react';
 import { MayaCoreCanvas } from './MayaCoreCanvas';
 import { MayaApi, ChatResponse } from '../services/api';
@@ -27,6 +28,7 @@ export interface ChatMessage {
   confirmationId?: string;
   confirmationHandled?: boolean;
   planId?: string;
+  pending?: boolean;
 }
 
 interface ChatStageProps {
@@ -46,15 +48,43 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   onTasksUpdate,
   onActionCompleted
 }) => {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      sender: 'maya',
-      text: "Hello! I'm MAYA, your personal AI desktop companion. I have full local awareness of your PC, active projects, and system health. How can I assist you today?",
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      waveform: false
+  const createWelcomeMessage = (): ChatMessage => ({
+    id: 'welcome',
+    sender: 'maya',
+    text: "Hello, Boss. I'm MAYA, your personal AI desktop companion. I can use live local context from your PC, projects, screen and files when those sources are accessible. What are we working on?",
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    waveform: false
+  });
+
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    try {
+      const raw = localStorage.getItem('maya.chat.history.v1');
+      if (!raw) return [createWelcomeMessage()];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length === 0) return [createWelcomeMessage()];
+
+      return parsed
+        .filter((item: any) =>
+          item &&
+          (item.sender === 'user' || item.sender === 'maya') &&
+          typeof item.text === 'string' &&
+          typeof item.time === 'string'
+        )
+        .slice(-250)
+        .map((item: any) => ({
+          id: String(item.id || `restored-${Date.now()}-${Math.random()}`),
+          sender: item.sender,
+          text: item.text,
+          time: item.time,
+          waveform: Boolean(item.waveform),
+          // Expired confirmation IDs/tokens are deliberately never restored.
+          requiresConfirmation: false,
+          confirmationHandled: true
+        }));
+    } catch {
+      return [createWelcomeMessage()];
     }
-  ]);
+  });
 
   const [inputMessage, setInputMessage] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -65,74 +95,196 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   const [expandedDetails, setExpandedDetails] = useState<Record<string, boolean>>({});
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Float32Array[]>([]);
+  const sourceSampleRateRef = useRef<number>(48000);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+
+  const encodeWav16Mono = (chunks: Float32Array[], sourceRate: number, targetRate = 16000): Blob => {
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    chunks.forEach(c => { merged.set(c, offset); offset += c.length; });
+
+    const ratio = sourceRate / targetRate;
+    const outLength = Math.max(1, Math.floor(merged.length / ratio));
+    const resampled = new Float32Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const srcPos = i * ratio;
+      const left = Math.floor(srcPos);
+      const right = Math.min(left + 1, merged.length - 1);
+      const frac = srcPos - left;
+      resampled[i] = merged[left] * (1 - frac) + merged[right] * frac;
+    }
+
+    const buffer = new ArrayBuffer(44 + resampled.length * 2);
+    const view = new DataView(buffer);
+    const writeAscii = (pos: number, text: string) => {
+      for (let i = 0; i < text.length; i++) view.setUint8(pos + i, text.charCodeAt(i));
+    };
+    writeAscii(0, 'RIFF');
+    view.setUint32(4, 36 + resampled.length * 2, true);
+    writeAscii(8, 'WAVE');
+    writeAscii(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, targetRate, true);
+    view.setUint32(28, targetRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeAscii(36, 'data');
+    view.setUint32(40, resampled.length * 2, true);
+
+    let p = 44;
+    for (let i = 0; i < resampled.length; i++, p += 2) {
+      const x = Math.max(-1, Math.min(1, resampled[i]));
+      view.setInt16(p, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+    }
+    return new Blob([buffer], { type: 'audio/wav' });
+  };
 
   const startPTT = async () => {
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const context = new AudioCtx();
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+
       audioChunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      sourceSampleRateRef.current = context.sampleRate;
+      processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        const input = event.inputBuffer.getChannelData(0);
+        audioChunksRef.current.push(new Float32Array(input));
       };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          const resStr = reader.result as string;
-          const base64 = resStr?.includes(',') ? resStr.split(',')[1] : resStr;
-          if (base64) {
-            setInternalCoreState('UNDERSTANDING');
-            setInternalStatusText('Transcribing speech...');
-            try {
-              const res = await MayaApi.sendPttAudio(base64);
-              if (res.success && res.transcript) {
-                handleSend(res.transcript);
-              } else {
-                setInternalCoreState('IDLE');
-                setInternalStatusText('No speech detected.');
-              }
-            } catch (err) {
-              setInternalCoreState('IDLE');
-            }
-          }
-        };
-        reader.readAsDataURL(blob);
-      };
-      recorder.start();
-      mediaRecorderRef.current = recorder;
+      source.connect(processor);
+      processor.connect(context.destination);
+
+      audioContextRef.current = context;
+      audioProcessorRef.current = processor;
+      audioSourceRef.current = source;
+      mediaStreamRef.current = stream;
+
       setIsPTTActive(true);
       setInternalCoreState('LISTENING');
       setInternalStatusText('Listening... (release to send)');
     } catch (err) {
       console.warn('Microphone access denied or unavailable', err);
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Microphone unavailable.');
     }
   };
 
-  const stopPTT = () => {
-    if (mediaRecorderRef.current && isPTTActive) {
-      mediaRecorderRef.current.stop();
-      setIsPTTActive(false);
+  const stopPTT = async () => {
+    if (!isPTTActive) return;
+    setIsPTTActive(false);
+
+    try {
+      audioProcessorRef.current?.disconnect();
+      audioSourceRef.current?.disconnect();
+      mediaStreamRef.current?.getTracks().forEach(t => t.stop());
+
+      const blob = encodeWav16Mono(
+        audioChunksRef.current,
+        sourceSampleRateRef.current,
+        16000
+      );
+
+      if (audioContextRef.current) {
+        await audioContextRef.current.close();
+      }
+
+      audioContextRef.current = null;
+      audioProcessorRef.current = null;
+      audioSourceRef.current = null;
+      mediaStreamRef.current = null;
+
+      setInternalCoreState('UNDERSTANDING');
+      setInternalStatusText('Transcribing speech...');
+
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const resStr = reader.result as string;
+          const base64 = resStr.includes(',') ? resStr.split(',')[1] : resStr;
+          const res = await MayaApi.sendPttAudio(base64);
+          if (res.success && res.transcript) {
+            setInternalStatusText(`Heard: "${res.transcript}"`);
+            await handleSend(res.transcript);
+          } else {
+            setInternalCoreState('IDLE');
+            setInternalStatusText(res.error || 'No speech detected.');
+          }
+        } catch (err) {
+          setInternalCoreState('ERROR');
+          setInternalStatusText('Speech transcription failed.');
+        }
+      };
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Could not process microphone audio.');
     }
   };
 
   // Sync external props if provided
-  const activeCoreState = externalCoreState || internalCoreState;
-  const activeSubState = externalSubState || internalSubState;
-  const activeStatusText = externalStatusText || internalStatusText;
+  const externalBusy = Boolean(externalCoreState && externalCoreState !== 'IDLE');
+  const activeCoreState = externalBusy
+    ? externalCoreState!
+    : internalCoreState;
+  const activeSubState = externalBusy && externalSubState
+    ? externalSubState
+    : internalSubState;
+  const activeStatusText = (
+    externalStatusText &&
+    externalStatusText !== 'Ready for your command.'
+  )
+    ? externalStatusText
+    : internalStatusText;
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, activeStatusText]);
+    messagesEndRef.current?.scrollIntoView({ behavior: isProcessing ? 'auto' : 'smooth' });
+  }, [messages, activeStatusText, isProcessing]);
+
+  useEffect(() => {
+    try {
+      const safeHistory = messages
+        .filter((message) => !message.pending)
+        .slice(-250)
+        .map((message) => ({
+          id: message.id,
+          sender: message.sender,
+          text: message.text,
+          time: message.time,
+          waveform: Boolean(message.waveform)
+        }));
+      localStorage.setItem('maya.chat.history.v1', JSON.stringify(safeHistory));
+    } catch {
+      // Conversation rendering must not fail if browser storage is unavailable.
+    }
+  }, [messages]);
 
   const toggleDetails = (id: string) => {
     setExpandedDetails(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const handleSend = async (textToSend?: string, permissionToken?: string) => {
+  const handleSend = async (
+    textToSend?: string,
+    permissionToken?: string,
+    showUserMessage: boolean = true
+  ) => {
     const text = textToSend || inputMessage.trim();
     if (!text || isProcessing) return;
 
@@ -143,8 +295,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    // Add user message if new
-    if (!textToSend) {
+    if (showUserMessage) {
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
         sender: 'user',
@@ -156,11 +307,44 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
     setIsProcessing(true);
     setInternalCoreState('THINKING');
-    setInternalSubState('PLAN');
-    setInternalStatusText('Formulating plan...');
+    setInternalSubState('ANALYZE');
+    setInternalStatusText('Thinking…');
+
+    const pendingId = `maya-pending-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let streamMessageId: string = pendingId;
+    let streamedText = '';
+
+    setMessages(prev => [
+      ...prev,
+      {
+        id: pendingId,
+        sender: 'maya',
+        text: '',
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        waveform: false,
+        pending: true
+      }
+    ]);
 
     try {
-      const resp: ChatResponse = await MayaApi.sendChatMessage(text, permissionToken);
+      const resp: ChatResponse = await MayaApi.sendChatMessageStream(
+        text,
+        permissionToken,
+        (delta: string) => {
+          if (!delta) return;
+          streamedText += delta;
+          setInternalStatusText('Maya is responding…');
+
+          const id = streamMessageId;
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === id
+                ? { ...msg, text: streamedText, pending: false }
+                : msg
+            )
+          );
+        }
+      );
 
       if (resp.tasks && resp.tasks.length > 0) {
         onTasksUpdate?.(resp.tasks);
@@ -171,7 +355,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
         setInternalStatusText('Authorization required for execution.');
 
         const confirmMsg: ChatMessage = {
-          id: `maya-confirm-${Date.now()}`,
+          id: pendingId,
           sender: 'maya',
           text: resp.reply,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -179,55 +363,53 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           confirmationId: resp.confirmation_id,
           planId: resp.plan_id,
           details: resp.details,
-          tasks: resp.tasks
+          tasks: resp.tasks,
+          pending: false
         };
-        setMessages(prev => [...prev, confirmMsg]);
+        setMessages(prev =>
+          prev.map(msg => msg.id === pendingId ? confirmMsg : msg)
+        );
         setIsProcessing(false);
         return;
       }
 
-      setInternalCoreState('EXECUTING');
-      setInternalSubState('EXECUTE');
-      setInternalStatusText('Executing & verifying...');
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === pendingId
+            ? {
+                ...msg,
+                text: resp.reply || streamedText || 'Done.',
+                details: resp.details,
+                tasks: resp.tasks,
+                waveform: true,
+                pending: false
+              }
+            : msg
+        )
+      );
 
-      setTimeout(() => {
-        setInternalCoreState('SUCCESS');
-        setInternalSubState('VERIFY');
-        setInternalStatusText('Verified and complete.');
-
-        const mayaMsg: ChatMessage = {
-          id: `maya-${Date.now()}`,
-          sender: 'maya',
-          text: resp.reply,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          details: resp.details,
-          tasks: resp.tasks,
-          waveform: true
-        };
-
-        setMessages(prev => [...prev, mayaMsg]);
-        onActionCompleted?.();
-
-        setTimeout(() => {
-          setInternalCoreState('IDLE');
-          setInternalStatusText('Ready for your command.');
-          setIsProcessing(false);
-        }, 2200);
-      }, 500);
+      onActionCompleted?.();
+      setInternalCoreState('IDLE');
+      setInternalSubState('VERIFY');
+      setInternalStatusText('Ready for your command.');
+      setIsProcessing(false);
 
     } catch (err: any) {
       setInternalCoreState('ERROR');
       setInternalStatusText('Service error.');
       setIsProcessing(false);
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `maya-err-${Date.now()}`,
-          sender: 'maya',
-          text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        }
-      ]);
+
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === pendingId
+            ? {
+                ...msg,
+                pending: false,
+                text: streamedText || `I hit an issue talking to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`
+              }
+            : msg
+        )
+      );
     }
   };
 
@@ -279,15 +461,11 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           };
           setMessages(prev => [...prev, mayaMsg]);
           onActionCompleted?.();
-          setInternalCoreState('SUCCESS');
+          setInternalCoreState('IDLE');
           setInternalStatusText('Verified and complete.');
-          setTimeout(() => {
-            setInternalCoreState('IDLE');
-            setInternalStatusText('Ready for your command.');
-            setIsProcessing(false);
-          }, 2200);
+          setIsProcessing(false);
         } else {
-          await handleSend('Proceed with confirmed action', res.permission_token);
+          await handleSend('Proceed with confirmed action', res.permission_token, false);
         }
       } else {
         setMessages(prev => [
@@ -304,6 +482,69 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     } catch (err: any) {
       setInternalCoreState('ERROR');
       setInternalStatusText(`Authorization error: ${err.message}`);
+    }
+  };
+
+  const handleAttachmentSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || isProcessing) return;
+
+    setInternalCoreState('THINKING');
+    setInternalStatusText(`Analyzing ${file.name}...`);
+
+    try {
+      const analysis = await MayaApi.uploadAttachment(file);
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `user-attachment-${Date.now()}`,
+          sender: 'user',
+          text: `Attached: ${file.name}`,
+          time: timeStr
+        }
+      ]);
+
+      const warnings = Array.isArray(analysis?.warnings) && analysis.warnings.length > 0
+        ? ` Warnings: ${analysis.warnings.join(' ')}`
+        : '';
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `maya-attachment-${Date.now()}`,
+          sender: 'maya',
+          text: `Loaded ${file.name}. ${analysis?.summary || 'Attachment analyzed.'}${warnings}`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          details: {
+            type: analysis?.type,
+            capabilities: analysis?.capabilities,
+            confidence: analysis?.confidence,
+            page_count: analysis?.page_count,
+            slide_count: analysis?.slide_count,
+            sheet_count: analysis?.sheet_count,
+            project_markers: analysis?.project_markers,
+            languages: analysis?.languages
+          }
+        }
+      ]);
+
+      setInternalCoreState('IDLE');
+      setInternalStatusText('Attachment ready in session context.');
+    } catch (err: any) {
+      setInternalCoreState('ERROR');
+      setInternalStatusText('Attachment analysis failed.');
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `maya-attachment-error-${Date.now()}`,
+          sender: 'maya',
+          text: `I couldn't analyze that attachment: ${err.message || 'Unknown error'}`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ]);
     }
   };
 
@@ -346,7 +587,19 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
               <div className="flex-1">
                 <div className="p-3.5 rounded-2xl glass-panel text-slate-100 text-[13px] leading-relaxed border border-blue-500/25 shadow-[0_0_15px_rgba(37,99,235,0.1)]">
-                  <p className="whitespace-pre-wrap">{msg.text}</p>
+                  {msg.pending ? (
+                    <div className="flex items-center space-x-2 text-cyan-200">
+                      <Loader2 size={15} className="animate-spin shrink-0" />
+                      <span>{activeStatusText || 'MAYA is working…'}</span>
+                      <span className="inline-flex items-end space-x-0.5" aria-hidden="true">
+                        <span className="w-1 h-1 rounded-full bg-cyan-400 animate-bounce" />
+                        <span className="w-1 h-1 rounded-full bg-cyan-400 animate-bounce [animation-delay:120ms]" />
+                        <span className="w-1 h-1 rounded-full bg-cyan-400 animate-bounce [animation-delay:240ms]" />
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="whitespace-pre-wrap">{msg.text}</p>
+                  )}
 
                   {/* Interactive Permission Authorization Card */}
                   {msg.requiresConfirmation && !msg.confirmationHandled && msg.confirmationId && (
@@ -356,7 +609,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
                         <span>Security Confirmation Required</span>
                       </div>
                       <p className="text-[11px] text-slate-300">
-                        This action modifies files, terminates processes, or runs privileged commands on your system.
+                        This action changes system or external state. Review the exact action above, then authorize it once if it is correct.
                       </p>
                       <div className="flex items-center space-x-2 pt-1">
                         <button
@@ -447,7 +700,19 @@ export const ChatStage: React.FC<ChatStageProps> = ({
       <div className="pt-2">
         <div className="relative flex items-center px-4 py-2.5 rounded-full glass-panel border border-cyan-500/30 shadow-[0_0_25px_rgba(34,211,238,0.15)] bg-[#0a1224]/80">
           {/* Paperclip attachment */}
-          <button className="text-slate-400 hover:text-slate-200 transition-colors mr-3 p-1 cursor-pointer">
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            className="hidden"
+            onChange={handleAttachmentSelected}
+            accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md,.json,.jsonl,.zip,.png,.jpg,.jpeg,.webp,.py,.js,.ts,.tsx,.c,.cpp,.h,.hpp,.java,.go,.rs,.html,.css,.xml,.yaml,.yml"
+          />
+          <button
+            onClick={() => attachmentInputRef.current?.click()}
+            disabled={isProcessing}
+            title="Attach a document, project ZIP, code file or image"
+            className="text-slate-400 hover:text-slate-200 disabled:text-slate-700 transition-colors mr-3 p-1 cursor-pointer disabled:cursor-not-allowed"
+          >
             <Paperclip size={18} />
           </button>
 

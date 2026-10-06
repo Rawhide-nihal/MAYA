@@ -19,6 +19,7 @@ from agents.developer.agent import DeveloperAgent
 from agents.diagnostics.engine import DiagnosticEngine
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
 
 class PlanState(str, Enum):
     CREATED = "CREATED"
@@ -28,6 +29,7 @@ class PlanState(str, Enum):
     OBSERVING = "OBSERVING"
     VERIFYING = "VERIFYING"
     COMPLETED = "COMPLETED"
+    PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
@@ -66,6 +68,12 @@ class DynamicTaskPlan:
     completed_at: Optional[float] = None
 
 class DynamicTaskPlanner:
+    NON_FATAL_FAILURE_TOOLS = {
+        "capture_screen", "analyze_screen", "get_system_status",
+        "inspect_project", "search_files", "search_web", "list_directory",
+        "read_file", "report_findings", "get_recent_actions"
+    }
+
     def __init__(
         self,
         permissions: PermissionManager,
@@ -78,6 +86,8 @@ class DynamicTaskPlanner:
         diagnostics: DiagnosticEngine,
         vision: VisionAgent,
         browser: Optional[BrowserAgent] = None,
+        communication: Optional[CommunicationAgent] = None,
+        unified_context=None,
         event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
     ):
         self.permissions = permissions
@@ -90,6 +100,8 @@ class DynamicTaskPlanner:
         self.diagnostics = diagnostics
         self.vision = vision
         self.browser = browser or BrowserAgent()
+        self.communication = communication or CommunicationAgent(windows=windows)
+        self.unified_context = unified_context
         self.event_callback = event_callback
         self.active_plans: Dict[str, DynamicTaskPlan] = {}
 
@@ -140,12 +152,19 @@ class DynamicTaskPlanner:
 
         elif tool == "open_application":
             app = args.get("application", "Visual Studio Code")
+            launch_arguments = {"application": app}
+            if args.get("profile"):
+                launch_arguments["profile"] = args.get("profile")
+            if args.get("path"):
+                launch_arguments["path"] = args.get("path")
+            if args.get("force_new"):
+                launch_arguments["force_new"] = True
             steps.append(DynamicPlanStep(
                 step_id=1,
                 name=f"Launch {app}",
                 description=f"Execute {app} binary and verify process",
                 tool="open_application",
-                arguments={"application": app}
+                arguments=launch_arguments
             ))
             steps.append(DynamicPlanStep(
                 step_id=2,
@@ -219,7 +238,12 @@ class DynamicTaskPlanner:
 
         plan = DynamicTaskPlan(plan_id=plan_id, goal=goal, state=PlanState.CREATED, steps=steps)
         self.active_plans[plan_id] = plan
-        self.emit("plan.created", {"plan_id": plan_id, "goal": goal, "total_steps": len(steps)})
+        self.emit("plan.created", {
+            "plan_id": plan_id,
+            "goal": goal,
+            "total_steps": len(steps),
+            "steps": [asdict(step) for step in steps],
+        })
         return plan
 
     def create_plan_from_neural(self, goal: str, decision: Any) -> DynamicTaskPlan:
@@ -267,6 +291,7 @@ class DynamicTaskPlanner:
 
         executed_steps = []
         last_result = None
+        partial_failures = []
 
         for idx, step in enumerate(plan.steps):
             if plan.cancelled:
@@ -277,7 +302,13 @@ class DynamicTaskPlanner:
             plan.active_step_index = idx
             step.state = StepState.RUNNING
             step.started_at = time.time()
-            self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "name": step.name})
+            self.emit("tool.started", {
+                "plan_id": plan.plan_id,
+                "step_id": step.step_id,
+                "tool": step.tool,
+                "name": step.name,
+                "description": step.description,
+            })
 
             # Execute tool with permission check
             tool_res = self.execute_tool(step.tool, step.arguments, token=permission_token, plan_id=plan.plan_id)
@@ -315,27 +346,45 @@ class DynamicTaskPlanner:
             executed_steps.append(asdict(step))
 
             if is_success:
-                self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool})
+                self.emit("tool.completed", {
+                    "plan_id": plan.plan_id,
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "name": step.name,
+                    "verified": is_verified,
+                })
             else:
                 self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "error": tool_res.get("error")})
+                if step.tool in self.NON_FATAL_FAILURE_TOOLS and idx < len(plan.steps) - 1:
+                    partial_failures.append({
+                        "step_id": step.step_id,
+                        "tool": step.tool,
+                        "error": tool_res.get("error", "Step failed")
+                    })
+                    continue
                 plan.state = PlanState.FAILED
                 break
 
-        if plan.state != PlanState.FAILED and plan.state != PlanState.CANCELLED and plan.state != PlanState.WAITING_FOR_PERMISSION:
-            plan.state = PlanState.COMPLETED
+        if plan.state not in {PlanState.FAILED, PlanState.CANCELLED, PlanState.WAITING_FOR_PERMISSION}:
+            plan.state = PlanState.PARTIAL_SUCCESS if partial_failures else PlanState.COMPLETED
             plan.completed_at = time.time()
-            self.emit("task.completed", {"plan_id": plan.plan_id})
+            self.emit("task.completed", {
+                "plan_id": plan.plan_id,
+                "partial": bool(partial_failures),
+                "failures": partial_failures
+            })
             self.emit("maya.state.changed", {"state": "IDLE", "plan_id": plan.plan_id})
 
         return {
             "plan_id": plan.plan_id,
             "state": plan.state.value,
             "steps": executed_steps,
-            "last_result": last_result
+            "last_result": last_result,
+            "partial_failures": partial_failures
         }
 
     def resume_plan(self, plan_id: str, confirmation_id: str, permission_token: str) -> Dict[str, Any]:
-        """Resumes an exact suspended plan at its pending step with single-use permission validation."""
+        """Resume a suspended plan while preserving verification and partial-success semantics."""
         if plan_id not in self.active_plans:
             return {"success": False, "error": f"Plan '{plan_id}' not found in active plans."}
 
@@ -349,7 +398,6 @@ class DynamicTaskPlanner:
 
         step = plan.steps[curr_idx]
 
-        # Strict validation of bound single-use token
         valid, reason = self.permissions.validate_token_for_resume(
             token=permission_token,
             plan_id=plan.plan_id,
@@ -362,31 +410,65 @@ class DynamicTaskPlanner:
             self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": False, "error": reason})
             return {"success": False, "error": reason}
 
-        self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": True, "token": permission_token})
+        self.emit("permission.resolved", {"plan_id": plan.plan_id, "approved": True})
         self.emit("maya.state.changed", {"state": "EXECUTING", "plan_id": plan.plan_id})
 
-        # Execute the suspended step with verified authorization
+        partial_failures = []
+
+        # Execute the exact suspended step with its single-use authorization.
         step.state = StepState.RUNNING
-        self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "name": step.name})
+        step.started_at = step.started_at or time.time()
+        self.emit("tool.started", {
+            "plan_id": plan.plan_id,
+            "step_id": step.step_id,
+            "tool": step.tool,
+            "name": step.name
+        })
 
-        tool_res = self.execute_tool(step.tool, step.arguments, token=permission_token, plan_id=plan.plan_id)
+        tool_res = self.execute_tool(
+            step.tool,
+            step.arguments,
+            token=permission_token,
+            plan_id=plan.plan_id
+        )
         self.permissions.consume_token(permission_token)
-        is_success = tool_res.get("success", False)
-        is_verified = tool_res.get("verified", is_success)
 
+        is_success = tool_res.get("success", False)
         step.state = StepState.SUCCESS if is_success else StepState.FAILED
         step.result = tool_res
-        step.verified = is_verified
+        step.verified = tool_res.get("verified", is_success)
         step.completed_at = time.time()
 
         if not is_success:
-            self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool, "error": tool_res.get("error")})
-            plan.state = PlanState.FAILED
-            return {"success": False, "plan_id": plan.plan_id, "state": "FAILED", "error": tool_res.get("error")}
+            self.emit("tool.failed", {
+                "plan_id": plan.plan_id,
+                "step_id": step.step_id,
+                "tool": step.tool,
+                "error": tool_res.get("error")
+            })
+            if step.tool in self.NON_FATAL_FAILURE_TOOLS and curr_idx < len(plan.steps) - 1:
+                partial_failures.append({
+                    "step_id": step.step_id,
+                    "tool": step.tool,
+                    "error": tool_res.get("error", "Step failed")
+                })
+            else:
+                plan.state = PlanState.FAILED
+                return {
+                    "success": False,
+                    "plan_id": plan.plan_id,
+                    "state": plan.state.value,
+                    "error": tool_res.get("error"),
+                    "steps": [asdict(s) for s in plan.steps],
+                }
+        else:
+            self.emit("tool.completed", {
+                "plan_id": plan.plan_id,
+                "step_id": step.step_id,
+                "tool": step.tool
+            })
 
-        self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": step.step_id, "tool": step.tool})
-
-        # Continue remaining steps in plan
+        # Continue remaining steps. A later privileged step can suspend the same plan again.
         for idx in range(curr_idx + 1, len(plan.steps)):
             if plan.cancelled:
                 plan.steps[idx].state = StepState.CANCELLED
@@ -397,9 +479,19 @@ class DynamicTaskPlanner:
             next_step = plan.steps[idx]
             next_step.state = StepState.RUNNING
             next_step.started_at = time.time()
-            self.emit("tool.started", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool, "name": next_step.name})
+            self.emit("tool.started", {
+                "plan_id": plan.plan_id,
+                "step_id": next_step.step_id,
+                "tool": next_step.tool,
+                "name": next_step.name
+            })
 
-            next_res = self.execute_tool(next_step.tool, next_step.arguments, plan_id=plan.plan_id)
+            next_res = self.execute_tool(
+                next_step.tool,
+                next_step.arguments,
+                plan_id=plan.plan_id
+            )
+
             if next_res.get("requires_confirmation"):
                 next_step.state = StepState.WAITING
                 next_step.requires_permission = True
@@ -413,9 +505,12 @@ class DynamicTaskPlanner:
                 return {
                     "success": False,
                     "plan_id": plan.plan_id,
-                    "state": "WAITING_FOR_PERMISSION",
+                    "state": plan.state.value,
                     "requires_confirmation": True,
-                    "confirmation_id": next_step.confirmation_id
+                    "confirmation_id": next_step.confirmation_id,
+                    "step": asdict(next_step),
+                    "steps": [asdict(s) for s in plan.steps],
+                    "partial_failures": partial_failures,
                 }
 
             step_ok = next_res.get("success", False)
@@ -424,23 +519,47 @@ class DynamicTaskPlanner:
             next_step.verified = next_res.get("verified", step_ok)
             next_step.completed_at = time.time()
 
-            if not step_ok:
-                self.emit("tool.failed", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool, "error": next_res.get("error")})
-                plan.state = PlanState.FAILED
-                break
-            self.emit("tool.completed", {"plan_id": plan.plan_id, "step_id": next_step.step_id, "tool": next_step.tool})
+            if step_ok:
+                self.emit("tool.completed", {
+                    "plan_id": plan.plan_id,
+                    "step_id": next_step.step_id,
+                    "tool": next_step.tool
+                })
+                continue
 
-        if plan.state != PlanState.FAILED and plan.state != PlanState.CANCELLED:
-            plan.state = PlanState.COMPLETED
+            self.emit("tool.failed", {
+                "plan_id": plan.plan_id,
+                "step_id": next_step.step_id,
+                "tool": next_step.tool,
+                "error": next_res.get("error")
+            })
+            if next_step.tool in self.NON_FATAL_FAILURE_TOOLS and idx < len(plan.steps) - 1:
+                partial_failures.append({
+                    "step_id": next_step.step_id,
+                    "tool": next_step.tool,
+                    "error": next_res.get("error", "Step failed")
+                })
+                continue
+
+            plan.state = PlanState.FAILED
+            break
+
+        if plan.state not in {PlanState.FAILED, PlanState.CANCELLED, PlanState.WAITING_FOR_PERMISSION}:
+            plan.state = PlanState.PARTIAL_SUCCESS if partial_failures else PlanState.COMPLETED
             plan.completed_at = time.time()
-            self.emit("task.completed", {"plan_id": plan.plan_id})
+            self.emit("task.completed", {
+                "plan_id": plan.plan_id,
+                "partial": bool(partial_failures),
+                "failures": partial_failures
+            })
             self.emit("maya.state.changed", {"state": "IDLE", "plan_id": plan.plan_id})
 
         return {
-            "success": plan.state == PlanState.COMPLETED,
+            "success": plan.state in {PlanState.COMPLETED, PlanState.PARTIAL_SUCCESS},
             "plan_id": plan.plan_id,
             "state": plan.state.value,
-            "steps": [asdict(s) for s in plan.steps]
+            "steps": [asdict(s) for s in plan.steps],
+            "partial_failures": partial_failures,
         }
 
     def execute_tool(self, tool_name: str, arguments: Dict[str, Any], token: Optional[str] = None, plan_id: str = "direct") -> Dict[str, Any]:
@@ -464,7 +583,13 @@ class DynamicTaskPlanner:
         # Windows Agent tools
         if tool_name == "open_application":
             app = arguments.get("application", "Visual Studio Code")
-            result = self.windows.launch_application(app)
+            launch_args = [arguments.get("path")] if arguments.get("path") else None
+            result = self.windows.launch_application(
+                app,
+                arguments=launch_args,
+                profile=arguments.get("profile"),
+                force_new=bool(arguments.get("force_new", False)),
+            )
             affected_resources.append(app)
             summary = f"Opened {app}"
             undo_available = False
@@ -579,6 +704,28 @@ class DynamicTaskPlanner:
             summary = f"Applied code patch to {fp}"
 
         # Filesystem tools
+        elif tool_name == "open_file":
+            ref = arguments.get("filepath", "")
+            result = self.windows.open_file(ref)
+            if result.get("path"):
+                affected_resources.append(result["path"])
+            summary = (
+                f"Opened file {result.get('name') or ref}"
+                if result.get("success")
+                else f"Failed to open file reference {ref}"
+            )
+
+        elif tool_name == "copy_file_to_clipboard":
+            ref = arguments.get("filepath", "")
+            result = self.windows.copy_file_to_clipboard(ref)
+            if result.get("path"):
+                affected_resources.append(result["path"])
+            summary = (
+                f"Copied {result.get('name') or ref} to Windows clipboard"
+                if result.get("success")
+                else f"Failed to copy file reference {ref} to clipboard"
+            )
+
         elif tool_name == "list_directory":
             result = self.filesystem.list_directory(arguments.get("path"))
             summary = f"Listed directory contents ({result.get('count', 0)} items)"
@@ -653,11 +800,23 @@ class DynamicTaskPlanner:
 
         # Vision tools
         elif tool_name == "capture_screen":
-            result = self.vision.capture_screen(return_base64=arguments.get("return_base64", False))
+            if self.unified_context is not None:
+                result = self.unified_context.capture_screen(
+                    label=arguments.get("label"),
+                    save=bool(arguments.get("save", False))
+                )
+            else:
+                result = self.vision.capture_screen(return_base64=arguments.get("return_base64", False))
             summary = "Captured desktop display"
 
         elif tool_name == "analyze_screen":
             result = self.vision.analyze_screen()
+            if self.unified_context is not None and result.get("screenshot_path"):
+                self.unified_context.remember_entity(
+                    "screen_analysis",
+                    result,
+                    label="latest screen analysis"
+                )
             summary = f"Analyzed screen: active {result.get('active_window')}"
 
         # Browser tools
@@ -668,6 +827,119 @@ class DynamicTaskPlanner:
         elif tool_name == "search_web":
             result = self.browser.search_web(arguments.get("query", ""))
             summary = f"Web search for '{arguments.get('query')}'"
+
+        # Authenticated communication tools
+        elif tool_name == "inspect_communication_contact":
+            query = arguments.get("query", "")
+            result = self.communication.inspect_contact(
+                service=arguments.get("service", "whatsapp"),
+                query=query,
+                profile=arguments.get("profile", "main"),
+                record_type=arguments.get("record_type"),
+            )
+            summary = (
+                f"Inspected and enriched WhatsApp details for {result.get('name') or query}"
+                if result.get("success")
+                else f"Failed to inspect WhatsApp details for {query}"
+            )
+
+        elif tool_name == "lookup_communication_contact":
+            service = arguments.get("service", "whatsapp")
+            query = arguments.get("query", "")
+            result = self.communication.lookup_contact(
+                service=service,
+                query=query,
+                detail=arguments.get("detail"),
+                record_type=arguments.get("record_type"),
+            )
+            if result.get("found"):
+                summary = f"Found {result.get('name') or query} in the local {service.title()} contact index"
+            elif result.get("ambiguous"):
+                summary = f"Contact lookup for {query} was ambiguous"
+            else:
+                summary = f"Did not find {query} in the local {service.title()} contact index"
+
+        elif tool_name == "read_communication_messages":
+            service = arguments.get("service", "whatsapp")
+            recipient = arguments.get("recipient", "")
+            result = self.communication.read_messages(
+                recipient=recipient,
+                limit=arguments.get("limit", 1),
+                service=service,
+                profile=arguments.get("profile", "main"),
+                incoming_only=bool(arguments.get("incoming_only", False)),
+            )
+            summary = (
+                f"Read {result.get('count', 0)} live {service.title()} message(s) from {recipient}"
+                if result.get("success")
+                else f"Failed to read live {service.title()} messages from {recipient}"
+            )
+
+        elif tool_name == "open_communication_service":
+            service = arguments.get("service", "whatsapp")
+            result = self.communication.open_service(
+                service=service,
+                profile=arguments.get("profile", "main"),
+                force_new=bool(arguments.get("force_new", False)),
+            )
+            summary = (
+                f"Opened {service.title()} using {'a new tab' if result.get('created_new') else 'the existing tab'}"
+                if result.get("success")
+                else f"Failed to open {service.title()}"
+            )
+
+        elif tool_name == "sync_communication_contacts":
+            service = arguments.get("service", "whatsapp")
+            result = self.communication.sync_contacts(
+                service=service,
+                profile=arguments.get("profile", "main"),
+            )
+            summary = (
+                f"Synced {result.get('contacts_synced', result.get('local_contact_count', 0))} {service.title()} contact/chat names"
+                if result.get("success")
+                else f"Failed to sync {service.title()} contacts"
+            )
+
+        elif tool_name == "prepare_communication":
+            result = self.communication.prepare(
+                service=arguments.get("service", ""),
+                recipient=arguments.get("recipient", ""),
+                message=arguments.get("message", ""),
+                subject=arguments.get("subject"),
+                profile=arguments.get("profile", "main"),
+                attachment_path=arguments.get("attachment_path"),
+            )
+            if result.get("success") and result.get("prepared"):
+                summary = f"Prepared {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
+            else:
+                summary = f"Failed to prepare {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
+
+        elif tool_name == "read_and_reply_communication":
+            result = self.communication.read_and_reply(
+                service=arguments.get("service", "whatsapp"),
+                recipient=arguments.get("recipient", ""),
+                message=arguments.get("message", ""),
+                profile=arguments.get("profile", "main"),
+            )
+            summary = (
+                f"Read latest WhatsApp message and sent verified reply to {arguments.get('recipient', '')}"
+                if result.get("success") and result.get("verified")
+                else f"Read/reply workflow for {arguments.get('recipient', '')} failed or was not verified"
+            )
+
+        elif tool_name == "send_communication":
+            result = self.communication.send(
+                service=arguments.get("service", ""),
+                recipient=arguments.get("recipient", ""),
+                message=arguments.get("message", ""),
+                subject=arguments.get("subject"),
+                profile=arguments.get("profile", "main"),
+                attachment_path=arguments.get("attachment_path"),
+            )
+            if result.get("success") and result.get("verified") and result.get("sent"):
+                summary = f"Sent {arguments.get('service', 'message')} communication to {arguments.get('recipient', '')}"
+            else:
+                summary = f"Communication send to {arguments.get('recipient', '')} failed or was not verified"
 
         # Memory & Ledger
         elif tool_name == "search_memory":
@@ -700,9 +972,55 @@ class DynamicTaskPlanner:
         else:
             result = {"success": False, "error": f"Unknown tool: {tool_name}"}
 
+        # Feed verified intermediate results back into the unified session context.
+        if self.unified_context is not None:
+            try:
+                self.unified_context.remember_entity(
+                    "tool_result",
+                    {
+                        "tool": tool_name,
+                        "arguments": arguments,
+                        "result": result,
+                        "verified": result.get("verified", result.get("success", False)),
+                    },
+                    label=f"last {tool_name} result"
+                )
+                for key in ("filepath", "path", "saved_path"):
+                    candidate = result.get(key)
+                    if candidate:
+                        self.unified_context.remember_entity(
+                            "file",
+                            candidate,
+                            label="latest file"
+                        )
+                        break
+            except Exception:
+                pass
+
         # Action Ledger Recording
         action_id = str(uuid.uuid4())[:8]
         is_success = result.get("success", False)
+
+        ledger_result = result
+        if tool_name == "read_communication_messages":
+            ledger_result = {
+                "success": result.get("success", False),
+                "verified": result.get("verified", False),
+                "service": result.get("service"),
+                "recipient": result.get("recipient"),
+                "count": result.get("count", 0),
+                "live_read": result.get("live_read", False),
+            }
+        elif tool_name == "read_and_reply_communication":
+            ledger_result = {
+                "success": result.get("success", False),
+                "verified": result.get("verified", False),
+                "service": result.get("service"),
+                "recipient": result.get("recipient"),
+                "sent": result.get("sent", False),
+                "live_read_performed": bool(result.get("latest_read") or result.get("messages")),
+            }
+
         record = ActionRecord(
             action_id=action_id,
             plan_id=plan_id,
@@ -710,7 +1028,7 @@ class DynamicTaskPlanner:
             arguments=arguments,
             affected_resources=affected_resources,
             previous_state=prev_state,
-            result=result,
+            result=ledger_result,
             verified=result.get("verified", is_success),
             undo_available=undo_available,
             status="success" if is_success else "failed",

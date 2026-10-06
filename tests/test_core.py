@@ -5,8 +5,11 @@ Hardware Telemetry, and Model Runtime.
 """
 import os
 import gc
+import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -30,6 +33,12 @@ from agents.diagnostics.engine import DiagnosticEngine
 from agents.terminal.agent import TerminalAgent
 from agents.vision.agent import VisionAgent
 from agents.browser.agent import BrowserAgent
+from agents.communication.agent import CommunicationAgent
+from agents.communication.bridge import CommunicationBridge
+from maya_core.personality.engine import PersonalityEngine, MayaMode, ResponseDepth
+from maya_core.context.engine import UnifiedContextEngine
+from maya_core.attachments.intelligence import AttachmentIntelligence
+from maya_core.config import settings, get_user_screenshots_dir
 
 class TestMayaPhase2Core(unittest.TestCase):
     def setUp(self):
@@ -109,12 +118,232 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r4["intent"], "DEVELOPMENT_ACTION")
         self.assertEqual(r4["tool"], "inspect_project")
 
+        # External communication
+        r5 = self.classifier.classify_and_extract(
+            "Send a WhatsApp message to Rahul: I'll be there at 6"
+        )
+        self.assertEqual(r5["intent"], "PC_ACTION")
+        self.assertEqual(r5["tool"], "send_communication")
+        self.assertEqual(r5["arguments"]["service"], "whatsapp")
+        self.assertEqual(r5["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r5["arguments"]["message"], "I'll be there at 6")
+
+        r6 = self.classifier.classify_and_extract("Open WhatsApp in Chrome")
+        self.assertEqual(r6["tool"], "open_communication_service")
+        self.assertEqual(r6["arguments"]["service"], "whatsapp")
+        self.assertEqual(r6["arguments"]["profile"], "main")
+        self.assertFalse(r6["arguments"]["force_new"])
+
+        r7 = self.classifier.classify_and_extract(
+            "Send Rahul a WhatsApp message saying I fixed it"
+        )
+        self.assertEqual(r7["tool"], "send_communication")
+        self.assertEqual(r7["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r7["arguments"]["message"], "I fixed it")
+
+        r8 = self.classifier.classify_and_extract(
+            "Draft an email to friend@example.com saying Project is ready"
+        )
+        self.assertEqual(r8["tool"], "prepare_communication")
+        self.assertEqual(r8["arguments"]["service"], "gmail")
+        self.assertEqual(r8["arguments"]["recipient"], "friend@example.com")
+
+        r9 = self.classifier.classify_and_extract(
+            "Send this screenshot to Rahul on WhatsApp"
+        )
+        self.assertEqual(r9["tool"], "send_communication")
+        self.assertEqual(r9["arguments"]["service"], "whatsapp")
+        self.assertEqual(r9["arguments"]["recipient"], "Rahul")
+        self.assertEqual(r9["arguments"]["attachment_path"].lower(), "this screenshot")
+
+        r10 = self.classifier.classify_and_extract(
+            "Now paste that into WhatsApp"
+        )
+        self.assertEqual(r10["tool"], "prepare_communication")
+        self.assertEqual(r10["arguments"]["service"], "whatsapp")
+        self.assertEqual(r10["arguments"]["recipient"], "current chat")
+        self.assertEqual(r10["arguments"]["attachment_path"].lower(), "that")
+        self.assertEqual(r10["arguments"]["message"], "")
+
+        r11 = self.classifier.classify_and_extract(
+            "Send the screenshot to this guy in whatsapp"
+        )
+        self.assertEqual(r11["tool"], "send_communication")
+        self.assertEqual(r11["arguments"]["service"], "whatsapp")
+        self.assertEqual(r11["arguments"]["recipient"], "current chat")
+        self.assertEqual(r11["arguments"]["attachment_path"].lower(), "the screenshot")
+
+        r12 = self.classifier.classify_and_extract(
+            "Open Chrome default profile"
+        )
+        self.assertEqual(r12["tool"], "open_application")
+        self.assertEqual(r12["arguments"]["application"], "Google Chrome")
+        self.assertEqual(r12["arguments"]["profile"], "main")
+
+        r13 = self.classifier.classify_and_extract(
+            "Sync my WhatsApp contacts"
+        )
+        self.assertEqual(r13["tool"], "sync_communication_contacts")
+        self.assertEqual(r13["arguments"]["service"], "whatsapp")
+
+        r14 = self.classifier.classify_and_extract(
+            "Open the latest screenshot"
+        )
+        self.assertEqual(r14["tool"], "open_file")
+        self.assertIn("screenshot", r14["arguments"]["filepath"].lower())
+
+        r15 = self.classifier.classify_and_extract(
+            "Open the recent PNG file"
+        )
+        self.assertEqual(r15["tool"], "open_file")
+        self.assertIn("png", r15["arguments"]["filepath"].lower())
+
+        r16 = self.classifier.classify_and_extract(
+            "Copy the latest screenshot to clipboard"
+        )
+        self.assertEqual(r16["tool"], "copy_file_to_clipboard")
+        self.assertIn("screenshot", r16["arguments"]["filepath"].lower())
+
+        r17 = self.classifier.classify_and_extract(
+            "Copy this file to my clipboard"
+        )
+        self.assertEqual(r17["tool"], "copy_file_to_clipboard")
+        self.assertEqual(r17["arguments"]["filepath"].lower(), "this file")
+
+        r18 = self.classifier.classify_and_extract(
+            r"Copy C:\Users\Boss\Documents\report.pdf to clipboard"
+        )
+        self.assertEqual(r18["tool"], "copy_file_to_clipboard")
+        self.assertTrue(r18["arguments"]["filepath"].lower().endswith("report.pdf"))
+
+        r19 = self.classifier.classify_and_extract(
+            r"Open D:\Projects\archive.zip"
+        )
+        self.assertEqual(r19["tool"], "open_file")
+        self.assertTrue(r19["arguments"]["filepath"].lower().endswith("archive.zip"))
+
+        r20 = self.classifier.classify_and_extract(
+            "Maya, sync my WhatsApp contacts."
+        )
+        self.assertEqual(r20["tool"], "sync_communication_contacts")
+        self.assertEqual(r20["arguments"]["service"], "whatsapp")
+
+        r21 = self.classifier.classify_and_extract(
+            "Can u find a contact Named Niteesh?"
+        )
+        self.assertEqual(r21["tool"], "lookup_communication_contact")
+        self.assertEqual(r21["arguments"]["service"], "whatsapp")
+        self.assertEqual(r21["arguments"]["query"], "Niteesh")
+
+        r22 = self.classifier.classify_and_extract("Open WhatsApp")
+        self.assertEqual(r22["tool"], "open_communication_service")
+        self.assertFalse(r22["arguments"]["force_new"])
+
+        r23 = self.classifier.classify_and_extract("Open WhatsApp in a new tab")
+        self.assertEqual(r23["tool"], "open_communication_service")
+        self.assertTrue(r23["arguments"]["force_new"])
+
+        r24 = self.classifier.classify_and_extract("Open Chrome in a new window")
+        self.assertEqual(r24["tool"], "open_application")
+        self.assertTrue(r24["arguments"]["force_new"])
+
+        r25 = self.classifier.classify_and_extract("Give Niteesh number")
+        self.assertEqual(r25["tool"], "inspect_communication_contact")
+        self.assertEqual(r25["arguments"]["query"], "Niteesh")
+
+        r26 = self.classifier.classify_and_extract("Find group Project Team")
+        self.assertEqual(r26["tool"], "lookup_communication_contact")
+        self.assertEqual(r26["arguments"]["record_type"], "group")
+
+        r27 = self.classifier.classify_and_extract("Read the latest message from Niteesh")
+        self.assertEqual(r27["tool"], "read_communication_messages")
+        self.assertEqual(r27["arguments"]["recipient"], "Niteesh")
+        self.assertEqual(r27["arguments"]["limit"], 1)
+
+        self.assertTrue(r27["arguments"]["incoming_only"])
+
+        r28 = self.classifier.classify_and_extract("Read last 3 WhatsApp messages from Project Team")
+        self.assertEqual(r28["tool"], "read_communication_messages")
+        self.assertEqual(r28["arguments"]["limit"], 3)
+
+        self.assertTrue(r28["arguments"]["incoming_only"])
+
+        r29 = self.classifier.classify_and_extract(
+            "Read the latest message from Niteesh and reply saying I'll call in 10 minutes"
+        )
+        self.assertEqual(r29["tool"], "read_and_reply_communication")
+        self.assertEqual(r29["arguments"]["recipient"], "Niteesh")
+        self.assertIn("10 minutes", r29["arguments"]["message"])
+
+        r30 = self.classifier.classify_and_extract(
+            r"Send folder D:\Projects\Demo to Niteesh on WhatsApp"
+        )
+        self.assertEqual(r30["tool"], "send_communication")
+        self.assertEqual(r30["arguments"]["recipient"], "Niteesh")
+        self.assertTrue(r30["arguments"]["attachment_path"].endswith(r"Projects\Demo"))
+
+        r31 = self.classifier.classify_and_extract(
+            "Text him saying I'll call later"
+        )
+        self.assertEqual(r31["tool"], "send_communication")
+        self.assertEqual(r31["arguments"]["recipient"].lower(), "him")
+
+        self.brain._last_communication_recipient = "Niteesh"
+        resolved_pronoun = self.brain._resolve_argument_references(
+            r31["arguments"]
+        )
+        self.assertEqual(resolved_pronoun["recipient"], "Niteesh")
+
+        clarification = self.brain.process_request(
+            "Can u text him from my side"
+        )
+        self.assertEqual(clarification["intent"], "CLARIFICATION")
+        self.assertIn("Niteesh", clarification["reply"])
+        self.assertIn("what do you want me to send", clarification["reply"].lower())
+
+        self.assertFalse(
+            self.brain.is_fast_conversation("Maya, sync my WhatsApp contacts.")
+        )
+        self.assertFalse(
+            self.brain.is_fast_conversation("Can u find a contact Named Niteesh?")
+        )
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
         p_read = self.permissions.check_permission("get_system_status", {})
         self.assertTrue(p_read.granted)
         self.assertFalse(p_read.requires_confirmation)
+
+        # Sending external communication is Level 3 and requires confirmation
+        # under MAYA's default Level 2 permission policy.
+        send_args = {
+            "service": "whatsapp",
+            "recipient": "Rahul",
+            "message": "I'll be there at 6",
+            "profile": "main"
+        }
+        p_send = self.permissions.check_permission("send_communication", send_args)
+        self.assertFalse(p_send.granted)
+        self.assertTrue(p_send.requires_confirmation)
+        self.assertEqual(p_send.required_level, PermissionLevel.LEVEL_3_MODIFICATION)
+
+        read_reply_args = {
+            "service": "whatsapp",
+            "recipient": "Niteesh",
+            "message": "I'll call in 10 minutes",
+            "profile": "main"
+        }
+        p_read_reply = self.permissions.check_permission(
+            "read_and_reply_communication",
+            read_reply_args
+        )
+        self.assertFalse(p_read_reply.granted)
+        self.assertTrue(p_read_reply.requires_confirmation)
+        self.assertEqual(
+            p_read_reply.required_level,
+            PermissionLevel.LEVEL_3_MODIFICATION
+        )
 
         # Level 4 critical action must require confirmation
         p_crit = self.permissions.check_permission("delete_file", {"filepath": "important.txt"})
@@ -218,9 +447,19 @@ class TestMayaPhase2Core(unittest.TestCase):
         # Verify events were dispatched
         event_names = [e[0] for e in self.events_received]
         self.assertIn("plan.created", event_names)
+        self.assertIn("task.plan.created", event_names)
         self.assertIn("tool.started", event_names)
+        self.assertIn("task.step.started", event_names)
         self.assertIn("tool.completed", event_names)
+        self.assertIn("task.step.completed", event_names)
         self.assertIn("task.completed", event_names)
+
+        plan_created_payload = next(
+            payload for name, payload in self.events_received
+            if name == "plan.created"
+        )
+        self.assertTrue(plan_created_payload.get("steps"))
+        self.assertIn("description", plan_created_payload["steps"][0])
 
     # 6. Real Hardware Telemetry (Zero fake data)
     def test_hardware_profiler(self):
@@ -355,6 +594,19 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertIsNotNone(default_tool_registry.get("get_system_status"))
         self.assertIsNotNone(default_tool_registry.get("search_files"))
         self.assertIsNotNone(default_tool_registry.get("rollback_last_action"))
+        self.assertIsNotNone(default_tool_registry.get("prepare_communication"))
+        self.assertIsNotNone(default_tool_registry.get("send_communication"))
+
+        self.assertIsNotNone(default_tool_registry.get("sync_communication_contacts"))
+        self.assertIsNotNone(default_tool_registry.get("open_file"))
+        self.assertIsNotNone(default_tool_registry.get("copy_file_to_clipboard"))
+
+        self.assertIsNotNone(default_tool_registry.get("lookup_communication_contact"))
+
+        self.assertIsNotNone(default_tool_registry.get("inspect_communication_contact"))
+        self.assertIsNotNone(default_tool_registry.get("read_communication_messages"))
+        self.assertIsNotNone(default_tool_registry.get("open_communication_service"))
+        self.assertIsNotNone(default_tool_registry.get("read_and_reply_communication"))
 
         # Verify argument validation
         valid, err = default_tool_registry.validate_call("open_application", {"application": "VS Code"})
@@ -365,6 +617,852 @@ class TestMayaPhase2Core(unittest.TestCase):
         invalid, err = default_tool_registry.validate_call("open_application", {})
         self.assertFalse(invalid)
         self.assertIn("Missing required parameter", err)
+
+    def test_communication_agent_preserves_exact_payload(self):
+        class FakeWindows:
+            def __init__(self):
+                self.calls = []
+
+            def launch_application(self, app_name, arguments=None, cwd=None, profile=None):
+                self.calls.append({
+                    "app_name": app_name,
+                    "arguments": arguments,
+                    "profile": profile
+                })
+                return {
+                    "success": True,
+                    "verified": True,
+                    "profile_name": "Main",
+                    "profile_directory": "Default"
+                }
+
+        class FakeBridge:
+            def __init__(self):
+                self.command = None
+
+            def submit(self, command, timeout=25.0):
+                self.command = dict(command)
+                return {
+                    "success": True,
+                    "verified": True,
+                    "sent": True
+                }
+
+        fake_windows = FakeWindows()
+        fake_bridge = FakeBridge()
+        agent = CommunicationAgent(windows=fake_windows, bridge=fake_bridge)
+
+        result = agent.send(
+            service="whatsapp",
+            recipient="Rahul",
+            message="I'll be there at 6",
+            profile="main"
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["verified"])
+        self.assertEqual(fake_bridge.command["service"], "whatsapp")
+        self.assertEqual(fake_bridge.command["recipient"], "Rahul")
+        self.assertEqual(fake_bridge.command["message"], "I'll be there at 6")
+        self.assertEqual(fake_bridge.command["action"], "send")
+        self.assertEqual(fake_windows.calls[0]["app_name"], "Google Chrome")
+        self.assertEqual(fake_windows.calls[0]["profile"], "main")
+
+        attachment = Path(self.temp_dir.name) / "capture.png"
+        attachment.write_bytes(b"test attachment bytes")
+        result_with_attachment = agent.send(
+            service="whatsapp",
+            recipient="Rahul",
+            message="",
+            profile="main",
+            attachment_path=str(attachment)
+        )
+        self.assertTrue(result_with_attachment["success"])
+        self.assertEqual(
+            fake_bridge.command["attachment_path"],
+            str(attachment.resolve())
+        )
+
+    def test_whatsapp_contact_records_upsert_details_groups_without_duplicates(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "rich_contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+
+        first = bridge.update_contacts(
+            "whatsapp",
+            [{"name": "Niteesh", "type": "unknown"}],
+            source="names_only"
+        )
+        self.assertEqual(first["total"], 1)
+
+        richer = bridge.update_contacts(
+            "whatsapp",
+            [{
+                "name": "Niteesh",
+                "jid": "919876543210@s.whatsapp.net",
+                "type": "contact"
+            }],
+            source="structured_sync"
+        )
+        self.assertEqual(richer["total"], 1)
+        self.assertGreaterEqual(richer["merged_duplicates"], 1)
+
+        niteesh = bridge.resolve_contact("whatsapp", "Niteesh")
+        self.assertTrue(niteesh["matched"])
+        self.assertEqual(niteesh["record"]["phone"], "919876543210")
+        self.assertEqual(niteesh["record"]["type"], "contact")
+
+        group_sync = bridge.update_contacts(
+            "whatsapp",
+            [{
+                "name": "Project Team",
+                "jid": "120363012345678901@g.us",
+                "type": "group"
+            }],
+            source="chat_sidebar"
+        )
+        self.assertEqual(group_sync["total"], 2)
+        self.assertEqual(group_sync["groups_total"], 1)
+
+        group = bridge.resolve_contact(
+            "whatsapp",
+            "Project Team",
+            record_type="group"
+        )
+        self.assertTrue(group["matched"])
+        self.assertEqual(group["record"]["type"], "group")
+        self.assertIsNone(group["record"]["phone"])
+
+        repeat = bridge.update_contacts(
+            "whatsapp",
+            [{
+                "name": "Project Team",
+                "jid": "120363012345678901@g.us",
+                "type": "group"
+            }],
+            source="manual_resync"
+        )
+        self.assertEqual(repeat["total"], 2)
+        self.assertEqual(len(bridge.list_contacts("whatsapp", limit=5000)), 2)
+
+        saved = json.loads(bridge._contacts_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["_meta"]["schema_version"], 2)
+
+    def test_browser_action_queue_round_trip(self):
+        bridge = CommunicationBridge()
+        holder = {}
+
+        def submit():
+            holder["result"] = bridge.submit_browser_action({
+                "type": "focus_service",
+                "service": "whatsapp",
+                "url": "https://web.whatsapp.com/",
+                "force_new": False,
+            }, timeout=2.0)
+
+        worker = threading.Thread(target=submit, daemon=True)
+        worker.start()
+
+        action = None
+        for _ in range(20):
+            action = bridge.next_browser_action()
+            if action:
+                break
+            time.sleep(0.02)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action["service"], "whatsapp")
+        self.assertFalse(action["force_new"])
+
+        bridge.complete_browser_action(action["action_id"], {
+            "success": True,
+            "verified": True,
+            "reused_existing": True,
+            "tab_id": 42,
+        })
+        worker.join(timeout=1.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder["result"]["success"])
+        self.assertTrue(holder["result"]["reused_existing"])
+
+    def test_whatsapp_multi_search_handles_name_typos_and_ranked_suggestions(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "search_contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+
+        bridge.update_contacts("whatsapp", [
+            {"name": "Nitheesh Kumar", "jid": "919999999999@s.whatsapp.net", "type": "contact"},
+            {"name": "Nitesh Reddy", "jid": "918888888888@s.whatsapp.net", "type": "contact"},
+            {"name": "Project Phoenix", "jid": "120363000000000001@g.us", "type": "group"},
+        ], source="test")
+
+        typo = bridge.resolve_contact("whatsapp", "Nithees Kumar")
+        self.assertTrue(typo["matched"])
+        self.assertEqual(typo["name"], "Nitheesh Kumar")
+        self.assertIn("multi_search", typo["resolution"])
+
+        prefix = bridge.resolve_contact("whatsapp", "Project Pho", record_type="group")
+        self.assertTrue(prefix["matched"])
+        self.assertEqual(prefix["name"], "Project Phoenix")
+
+        ambiguous = bridge.resolve_contact("whatsapp", "Nit")
+        self.assertFalse(ambiguous["matched"])
+        self.assertTrue(ambiguous["ambiguous"])
+        self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
+        self.assertGreaterEqual(ambiguous["suggestions"][0]["score"], ambiguous["suggestions"][1]["score"])
+
+    def test_whatsapp_contact_index_exact_fuzzy_and_ambiguous_resolution(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+
+        sync = bridge.update_contacts(
+            "whatsapp",
+            ["Rahul Kumar", "Rohan", "Rohit", "Boss Test"],
+            source="unit_test"
+        )
+        self.assertTrue(sync["success"])
+        self.assertEqual(sync["total"], 4)
+
+        exact = bridge.resolve_contact("whatsapp", "Rahul Kumar")
+        self.assertTrue(exact["matched"])
+        self.assertEqual(exact["name"], "Rahul Kumar")
+
+        fuzzy = bridge.resolve_contact("whatsapp", "Rahul Kumer")
+        self.assertTrue(fuzzy["matched"])
+        self.assertEqual(fuzzy["name"], "Rahul Kumar")
+
+        ambiguous = bridge.resolve_contact("whatsapp", "Roh")
+        self.assertFalse(ambiguous["matched"])
+        self.assertTrue(ambiguous["ambiguous"])
+        self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
+
+    def test_open_application_reuses_existing_unless_force_new(self):
+        from unittest.mock import patch, MagicMock
+
+        agent = WindowsAgent()
+
+        with patch.object(agent, "is_application_running", return_value=True), \
+             patch.object(agent, "focus_application", return_value={
+                 "success": True,
+                 "verified": True,
+                 "hwnd": 77,
+                 "title": "Notepad"
+             }), \
+             patch.object(agent, "find_application_path") as find_path:
+            reused = agent.launch_application("Notepad")
+        self.assertTrue(reused["success"])
+        self.assertTrue(reused["reused_existing"])
+        find_path.assert_not_called()
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 99
+        fake_proc.poll.return_value = None
+        with patch.object(agent, "find_application_path", return_value=r"C:\Windows\notepad.exe"), \
+             patch.object(agent, "_wait_for_application", return_value=True), \
+             patch("agents.windows.agent.subprocess.Popen", return_value=fake_proc):
+            fresh = agent.launch_application("Notepad", force_new=True)
+        self.assertTrue(fresh["success"])
+        self.assertFalse(fresh.get("reused_existing", False))
+
+    def test_windows_application_aliases_and_launcher_handoff(self):
+        from unittest.mock import patch, MagicMock
+
+        agent = WindowsAgent()
+
+        self.assertIn("chrome", agent._application_process_aliases(
+            "Google Chrome",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        ))
+        self.assertIn("msedge", agent._application_process_aliases(
+            "Microsoft Edge",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        ))
+        self.assertIn("code", agent._application_process_aliases(
+            "Visual Studio Code",
+            r"C:\Users\Boss\AppData\Local\Programs\Microsoft VS Code\Code.exe"
+        ))
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 4242
+        fake_proc.poll.return_value = 0  # launcher exited after handing off
+
+        with patch.object(agent, "find_application_path", return_value=r"C:\Apps\chrome.exe"), \
+             patch.object(agent, "_wait_for_application", return_value=True), \
+             patch("agents.windows.agent.subprocess.Popen", return_value=fake_proc):
+            result = agent.launch_application("Google Chrome")
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["verified"])
+        self.assertTrue(result.get("handoff_detected"))
+        self.assertFalse(result["launcher_alive"])
+
+        class FakeChromeProcess:
+            info = {
+                "name": "chrome.exe",
+                "exe": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            }
+
+        with patch("agents.windows.agent.psutil.process_iter", return_value=[FakeChromeProcess()]):
+            self.assertTrue(
+                agent.is_application_running(
+                    "Google Chrome",
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+                )
+            )
+
+    def test_direct_personality_social_replies(self):
+        personality = PersonalityEngine()
+
+        how = personality.direct_social_reply("Hey Maya how you doing")
+        self.assertIsNotNone(how)
+        self.assertIn("Boss", how)
+        self.assertIn("existential crisis", how)
+
+        identity = personality.direct_social_reply("Ur Maya")
+        self.assertIsNotNone(identity)
+        self.assertIn("Boss", identity)
+        self.assertIn("another AI", identity)
+
+    def test_recent_screenshot_and_image_file_resolution(self):
+        original = os.environ.get("MAYA_SCREENSHOT_DIR")
+        screenshots = Path(self.temp_dir.name) / "Pictures" / "Screenshots"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        old_png = screenshots / "Screenshot_old.png"
+        new_png = screenshots / "Screenshot_new.png"
+        jpeg = screenshots / "photo.jpeg"
+        old_png.write_bytes(b"old")
+        new_png.write_bytes(b"new")
+        jpeg.write_bytes(b"jpg")
+
+        now = time.time()
+        os.utime(old_png, (now - 30, now - 30))
+        os.utime(jpeg, (now - 20, now - 20))
+        os.utime(new_png, (now - 5, now - 5))
+
+        try:
+            os.environ["MAYA_SCREENSHOT_DIR"] = str(screenshots)
+            agent = WindowsAgent()
+
+            latest = agent.resolve_file_reference("latest screenshot")
+            self.assertTrue(latest["success"])
+            self.assertEqual(Path(latest["path"]).name, "Screenshot_new.png")
+
+            latest_png = agent.resolve_file_reference("recent png file")
+            self.assertTrue(latest_png["success"])
+            self.assertEqual(Path(latest_png["path"]).name, "Screenshot_new.png")
+
+            latest_jpeg = agent.resolve_file_reference("latest jpeg file")
+            self.assertTrue(latest_jpeg["success"])
+            self.assertEqual(Path(latest_jpeg["path"]).name, "photo.jpeg")
+        finally:
+            if original is None:
+                os.environ.pop("MAYA_SCREENSHOT_DIR", None)
+            else:
+                os.environ["MAYA_SCREENSHOT_DIR"] = original
+
+    def test_open_service_uses_windows_tab_search_before_creating_new_tab(self):
+        class FakeBridge:
+            def submit_browser_action(self, action, timeout=6.0):
+                return {
+                    "success": False,
+                    "verified": False,
+                    "error": "simulated sleeping MV3 worker"
+                }
+
+        class FakeWindows:
+            def __init__(self):
+                self.opened = False
+                self.searched = False
+
+            def focus_chrome_tab_by_search(self, profile, search_text, expected_title=None):
+                self.searched = True
+                return {
+                    "success": True,
+                    "verified": True,
+                    "reused_existing": True,
+                    "strategy": "chrome_tab_search",
+                    "title": "WhatsApp"
+                }
+
+            def open_url_in_chrome_profile(self, profile, url):
+                self.opened = True
+                return {"success": True, "verified": True, "created_new": True}
+
+        windows = FakeWindows()
+        agent = CommunicationAgent(windows=windows, bridge=FakeBridge())
+        result = agent.open_service("whatsapp", profile="main", force_new=False)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["reused_existing"])
+        self.assertTrue(windows.searched)
+        self.assertFalse(windows.opened)
+
+    def test_open_service_force_new_bypasses_existing_tab_search(self):
+        class FakeBridge:
+            def submit_browser_action(self, action, timeout=6.0):
+                return {"success": False, "verified": False, "error": "offline"}
+
+        class FakeWindows:
+            def __init__(self):
+                self.searched = False
+                self.opened = False
+
+            def focus_chrome_tab_by_search(self, *args, **kwargs):
+                self.searched = True
+                return {"success": True, "verified": True, "reused_existing": True}
+
+            def open_url_in_chrome_profile(self, profile, url):
+                self.opened = True
+                return {
+                    "success": True,
+                    "verified": True,
+                    "created_new": True,
+                    "strategy": "chrome_new_tab_keyboard"
+                }
+
+        windows = FakeWindows()
+        agent = CommunicationAgent(windows=windows, bridge=FakeBridge())
+        result = agent.open_service("whatsapp", profile="main", force_new=True)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["created_new"])
+        self.assertFalse(windows.searched)
+        self.assertTrue(windows.opened)
+
+    def test_folder_attachment_is_packaged_and_cleaned_after_send(self):
+        class FakeWindows:
+            def launch_application(self, *args, **kwargs):
+                return {"success": True, "verified": True, "profile_name": "Main"}
+
+        class FakeBridge:
+            def __init__(self):
+                self.command = None
+
+            def resolve_contact(self, service, recipient, record_type=None):
+                return {"matched": False, "ambiguous": False}
+
+            def submit_browser_action(self, action, timeout=6.0):
+                return {
+                    "success": True,
+                    "verified": True,
+                    "tab_id": 5,
+                    "reused_existing": True,
+                }
+
+            def submit(self, command, timeout=30.0):
+                self.command = dict(command)
+                self.assert_file_exists = os.path.isfile(command["attachment_path"])
+                return {
+                    "success": True,
+                    "verified": True,
+                    "sent": True,
+                }
+
+        folder = Path(self.temp_dir.name) / "folder_to_send"
+        folder.mkdir()
+        (folder / "note.txt").write_text("hello", encoding="utf-8")
+
+        fake_bridge = FakeBridge()
+        agent = CommunicationAgent(windows=FakeWindows(), bridge=fake_bridge)
+        result = agent.send(
+            service="whatsapp",
+            recipient="Niteesh",
+            message="",
+            profile="main",
+            attachment_path=str(folder),
+        )
+        self.assertTrue(result["success"])
+        self.assertTrue(result["folder_packaged_as_zip"])
+        self.assertTrue(fake_bridge.assert_file_exists)
+        self.assertTrue(fake_bridge.command["attachment_path"].endswith(".zip"))
+        self.assertFalse(os.path.exists(fake_bridge.command["attachment_path"]))
+
+    def test_live_message_result_is_sanitized_in_persistent_ledger(self):
+        original = self.planner.communication.read_messages
+        try:
+            self.planner.communication.read_messages = lambda **kwargs: {
+                "success": True,
+                "verified": True,
+                "service": "whatsapp",
+                "recipient": "Niteesh",
+                "count": 1,
+                "live_read": True,
+                "messages": [{
+                    "text": "private incoming message",
+                    "direction": "incoming"
+                }],
+                "latest": {
+                    "text": "private incoming message",
+                    "direction": "incoming"
+                }
+            }
+            result = self.planner.execute_tool(
+                "read_communication_messages",
+                {
+                    "service": "whatsapp",
+                    "recipient": "Niteesh",
+                    "limit": 1,
+                    "profile": "main"
+                }
+            )
+            self.assertTrue(result["success"])
+            latest_record = self.ledger.get_recent_actions(limit=1)[0]
+            serialized = json.dumps(latest_record.get("result", {}))
+            self.assertNotIn("private incoming message", serialized)
+            self.assertEqual(latest_record["result"]["count"], 1)
+        finally:
+            self.planner.communication.read_messages = original
+
+    def test_contact_lookup_and_grounded_followup_status(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "grounded_contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+        bridge.update_contacts("whatsapp", ["Niteesh", "Rahul"], source="unit_test")
+        self.planner.communication.bridge = bridge
+
+        lookup = self.planner.communication.lookup_contact("whatsapp", "Niteesh")
+        self.assertTrue(lookup["success"])
+        self.assertTrue(lookup["found"])
+        self.assertEqual(lookup["name"], "Niteesh")
+
+        sync_result = {
+            "success": True,
+            "verified": True,
+            "contacts_synced": 2,
+            "local_contact_count": 2,
+            "complete": True,
+            "partial": False,
+        }
+        self.ledger.record_action(ActionRecord(
+            action_id="sync-followup",
+            plan_id="plan-sync",
+            tool_name="sync_communication_contacts",
+            arguments={"service": "whatsapp", "profile": "main"},
+            affected_resources=[],
+            previous_state=None,
+            result=sync_result,
+            verified=True,
+            undo_available=False,
+            status="success",
+            timestamp=time.time(),
+            summary="Synced WhatsApp contacts"
+        ))
+
+        sync_followup = self.brain.process_request("Did u sync them?")
+        self.assertEqual(sync_followup["intent"], "ACTION_STATUS")
+        self.assertTrue(sync_followup["verified"])
+        self.assertIn("2 contact/chat", sync_followup["reply"])
+        self.assertFalse(self.brain.is_fast_conversation("Did u sync them?"))
+
+        lookup_result = {
+            "success": True,
+            "verified": True,
+            "found": True,
+            "service": "whatsapp",
+            "query": "Niteesh",
+            "name": "Niteesh",
+            "indexed_count": 2,
+        }
+        self.ledger.record_action(ActionRecord(
+            action_id="lookup-followup",
+            plan_id="plan-lookup",
+            tool_name="lookup_communication_contact",
+            arguments={"service": "whatsapp", "query": "Niteesh"},
+            affected_resources=[],
+            previous_state=None,
+            result=lookup_result,
+            verified=True,
+            undo_available=False,
+            status="success",
+            timestamp=time.time() + 0.01,
+            summary="Found Niteesh"
+        ))
+
+        found_followup = self.brain.process_request("Did u find?")
+        self.assertEqual(found_followup["intent"], "ACTION_STATUS")
+        self.assertIn("Niteesh", found_followup["reply"])
+        self.assertIn("found", found_followup["reply"].lower())
+
+    def test_verified_contact_result_synthesis_does_not_invent(self):
+        from maya_core.brain.decision import NeuralDecision
+
+        decision = NeuralDecision(
+            decision_type="tool_call",
+            tool="lookup_communication_contact",
+            arguments={"service": "whatsapp", "query": "Niteesh"},
+            confidence=1.0,
+        )
+        found = self.brain._synthesize_natural_response(
+            "Find Niteesh",
+            decision,
+            {
+                "state": "COMPLETED",
+                "steps": [],
+                "last_result": {
+                    "success": True,
+                    "verified": True,
+                    "found": True,
+                    "query": "Niteesh",
+                    "name": "Niteesh",
+                }
+            }
+        )
+        self.assertIn("Niteesh", found)
+        self.assertIn("Found", found)
+
+        missing = self.brain._synthesize_natural_response(
+            "Find Unknown Person",
+            NeuralDecision(
+                decision_type="tool_call",
+                tool="lookup_communication_contact",
+                arguments={"service": "whatsapp", "query": "Unknown Person"},
+                confidence=1.0,
+            ),
+            {
+                "state": "COMPLETED",
+                "steps": [],
+                "last_result": {
+                    "success": True,
+                    "verified": True,
+                    "found": False,
+                    "ambiguous": False,
+                    "query": "Unknown Person",
+                }
+            }
+        )
+        self.assertIn("couldn't find", missing.lower())
+
+    def test_chrome_configured_profile_beats_last_used_and_default_alias(self):
+        original_profile = settings.get("chrome_main_profile", "")
+        original_account = settings.get("chrome_main_account", "")
+        try:
+            settings.set("chrome_main_profile", "Profile 7")
+            settings.set("chrome_main_account", "")
+
+            agent = WindowsAgent()
+            agent._load_chrome_profile_state = lambda: {
+                "profile": {
+                    "last_used": "Profile 2",
+                    "info_cache": {
+                        "Profile 2": {"name": "Wrong Last Used", "user_name": "other@example.com"},
+                        "Profile 7": {"name": "Boss Main", "user_name": "boss@example.com"},
+                        "Default": {"name": "Default"}
+                    }
+                }
+            }
+
+            main_result = agent.resolve_chrome_profile("main")
+            self.assertTrue(main_result["success"])
+            self.assertEqual(main_result["profile_directory"], "Profile 7")
+            self.assertEqual(main_result["resolution"], "configured_main_profile")
+
+            default_result = agent.resolve_chrome_profile("default")
+            self.assertTrue(default_result["success"])
+            self.assertEqual(default_result["profile_directory"], "Profile 7")
+        finally:
+            settings.set("chrome_main_profile", original_profile)
+            settings.set("chrome_main_account", original_account)
+
+    def test_user_screenshot_directory_override_is_visible_folder(self):
+        original = os.environ.get("MAYA_SCREENSHOT_DIR")
+        target = Path(self.temp_dir.name) / "Pictures" / "Screenshots"
+        try:
+            os.environ["MAYA_SCREENSHOT_DIR"] = str(target)
+            resolved = get_user_screenshots_dir()
+            self.assertEqual(resolved.resolve(), target.resolve())
+            self.assertTrue(resolved.exists())
+        finally:
+            if original is None:
+                os.environ.pop("MAYA_SCREENSHOT_DIR", None)
+            else:
+                os.environ["MAYA_SCREENSHOT_DIR"] = original
+
+    def test_v5_personality_modes_and_adaptive_depth(self):
+        from maya_core.config import settings
+
+        original_mode = settings.get("maya_mode", "Normal")
+        try:
+            personality = PersonalityEngine()
+
+            mode = personality.parse_mode_command("Maya, focus mode")
+            self.assertEqual(mode, MayaMode.FOCUS)
+            personality.set_mode(mode.value)
+            self.assertEqual(personality.current_mode(), MayaMode.FOCUS)
+            self.assertEqual(
+                personality.response_depth("What is my CPU temperature?"),
+                ResponseDepth.QUICK
+            )
+
+            personality.set_mode("Normal")
+            self.assertEqual(
+                personality.response_depth("Go deep and analyze this entire project architecture"),
+                ResponseDepth.DEEP
+            )
+            self.assertEqual(
+                personality.severity("I think there is a security breach"),
+                "HIGH"
+            )
+            serious_prompt = personality.prompt_fragment("There is a security breach")
+            self.assertIn("Do not use humor", serious_prompt)
+
+            casual_prompt = personality.prompt_fragment("How are you doing?")
+            self.assertIn("generic customer-service bot", casual_prompt)
+            self.assertIn("slightly sarcastic", casual_prompt)
+            self.assertGreaterEqual(
+                personality.policy("How are you doing?").max_new_tokens,
+                80
+            )
+        finally:
+            settings.set("maya_mode", original_mode)
+
+    def test_v5_attachment_intelligence_text_csv_and_project_zip(self):
+        import zipfile
+
+        analyzer = AttachmentIntelligence(max_text_chars=12000)
+
+        text_path = Path(self.temp_dir.name) / "sample.py"
+        text_path.write_text("import os\nprint('hello')\n", encoding="utf-8")
+        text_result = analyzer.analyze(str(text_path))
+        self.assertTrue(text_result["success"])
+        self.assertEqual(text_result["line_count"], 2)
+        self.assertIn("import os", text_result["extracted_text"])
+
+        csv_path = Path(self.temp_dir.name) / "sample.csv"
+        csv_path.write_text("name,value\nalpha,1\nbeta,2\n", encoding="utf-8")
+        csv_result = analyzer.analyze(str(csv_path))
+        self.assertTrue(csv_result["success"])
+        self.assertEqual(csv_result["column_count_max"], 2)
+
+        zip_path = Path(self.temp_dir.name) / "project.zip"
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            archive.writestr(
+                "project/package.json",
+                '{"name":"demo","dependencies":{"react":"^19.0.0"},"devDependencies":{"vite":"^7.0.0"}}'
+            )
+            archive.writestr(
+                "project/src/main.ts",
+                "import React from 'react';\nimport helper from './helper';\n"
+            )
+            archive.writestr("project/src/helper.ts", "export default 1;\n")
+
+        zip_result = analyzer.analyze(str(zip_path))
+        self.assertTrue(zip_result["success"])
+        self.assertGreaterEqual(zip_result["dependency_count"], 2)
+        self.assertIn("project/package.json", zip_result["dependencies"])
+        self.assertIn("project/src/main.ts", zip_result["source_relationships"])
+
+    def test_v5_unified_context_screenshot_history_and_references(self):
+        from PIL import Image
+
+        class FakeWindows:
+            def list_windows(self):
+                return [{
+                    "title": "Test Window",
+                    "hwnd": 1,
+                    "pid": 1,
+                    "process_name": "test.exe",
+                    "bounds": {}
+                }]
+
+            def _find_window_hwnd(self, query):
+                return 1
+
+            def get_clipboard(self):
+                return "clipboard text"
+
+            def get_explorer_selection(self):
+                return ["C:/tmp/selected.txt"]
+
+            def list_processes(self, limit=10):
+                return [{"pid": 1, "name": "test.exe"}]
+
+        class FakeVision:
+            def __init__(self, root):
+                self.root = Path(root)
+                self.counter = 0
+
+            def capture_screen(self, return_base64=False):
+                self.counter += 1
+                path = self.root / f"screen_{self.counter}.png"
+                value = 0 if self.counter == 1 else 255
+                Image.new("RGB", (20, 20), (value, value, value)).save(path)
+                return {
+                    "success": True,
+                    "filepath": str(path),
+                    "width": 20,
+                    "height": 20,
+                    "timestamp": time.time()
+                }
+
+            def detect_windows(self):
+                return [{
+                    "title": "Test Window",
+                    "hwnd": 1,
+                    "pid": 1,
+                    "bbox": [0, 0, 20, 20],
+                    "is_active": True
+                }]
+
+            def extract_visible_errors(self, screenshot_path=None):
+                return []
+
+        context = UnifiedContextEngine(
+            windows=FakeWindows(),
+            vision=FakeVision(self.temp_dir.name)
+        )
+        first = context.capture_screen(label="before test")
+        second = context.capture_screen()
+        self.assertTrue(first["success"])
+        self.assertTrue(second["success"])
+        self.assertEqual(context.resolve_reference("latest screenshot")["kind"], "screenshot")
+        self.assertEqual(context._find_screenshot("before test")["id"], first["id"])
+
+        context.register_attachment({
+            "name": "report.pdf",
+            "path": "C:/tmp/report.pdf",
+            "type": "pdf",
+            "context_text": "report"
+        })
+        self.assertEqual(context.resolve_reference("this")["kind"], "attachment")
+        self.assertEqual(context.resolve_reference("this screenshot")["kind"], "screenshot")
+
+        self.brain.unified_context = context
+        resolved_args = self.brain._resolve_argument_references({
+            "attachment_path": "this file"
+        })
+        self.assertEqual(resolved_args["attachment_path"], "C:/tmp/report.pdf")
+
+        comparison = context.compare_screenshots("latest", "previous")
+        self.assertTrue(comparison["success"])
+        self.assertTrue(comparison["visual_change_detected"])
+        self.assertGreater(comparison["pixel_change_percent"], 0)
+
+        snapshot = context.snapshot(include_processes=True)
+        self.assertEqual(snapshot["active_process"], "test.exe")
+        self.assertEqual(snapshot["selected_files"][0], "C:/tmp/selected.txt")
+        self.assertEqual(snapshot["clipboard"], "clipboard text")
+
+        context.last_snapshot = {
+            "active_process": "explorer.exe",
+            "active_window_title": "File Explorer",
+            "selected_files": ["C:/tmp/selected.txt"],
+        }
+        selected_ref = context.resolve_reference("this file")
+        self.assertEqual(selected_ref["kind"], "file")
+        self.assertEqual(selected_ref["value"], "C:/tmp/selected.txt")
+        self.assertEqual(selected_ref["resolution"], "active_explorer_selection")
+
+    def test_v5_compound_command_fallback(self):
+        decision = self.brain._compound_fallback_decision(
+            "Take a screenshot, then check my project for errors"
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.decision_type, "plan")
+        tools = [step.tool for step in decision.steps]
+        self.assertIn("capture_screen", tools)
+        self.assertIn("inspect_project", tools)
+        self.assertGreaterEqual(len(tools), 2)
 
     # 13. Phase 4: Neural Decision Extraction & Schema Validation
     def test_neural_decision_parser(self):

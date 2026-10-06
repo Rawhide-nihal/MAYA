@@ -55,6 +55,8 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "list_processes": PermissionLevel.LEVEL_1_OBSERVATION,
     "get_recent_actions": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_memory": PermissionLevel.LEVEL_1_OBSERVATION,
+    "lookup_communication_contact": PermissionLevel.LEVEL_1_OBSERVATION,
+    "read_communication_messages": PermissionLevel.LEVEL_1_OBSERVATION,
     "capture_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "analyze_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_file_content": PermissionLevel.LEVEL_1_OBSERVATION,
@@ -72,6 +74,8 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "detect_project": PermissionLevel.LEVEL_1_OBSERVATION,
 
     # Safe actions (Level 2)
+    "open_file": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "copy_file_to_clipboard": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "open_application": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "open_application_and_inspect": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "focus_window": PermissionLevel.LEVEL_2_SAFE_ACTION,
@@ -87,6 +91,10 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "rollback_last_action": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "create_directory": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "run_safe_command": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "inspect_communication_contact": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "open_communication_service": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "sync_communication_contacts": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "prepare_communication": PermissionLevel.LEVEL_2_SAFE_ACTION,
 
     # Modification (Level 3)
     "write_file": PermissionLevel.LEVEL_3_MODIFICATION,
@@ -99,6 +107,8 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "close_application": PermissionLevel.LEVEL_3_MODIFICATION,
     "clean_temp_files": PermissionLevel.LEVEL_3_MODIFICATION,
     "execute_terminal_command": PermissionLevel.LEVEL_3_MODIFICATION,
+    "send_communication": PermissionLevel.LEVEL_3_MODIFICATION,
+    "read_and_reply_communication": PermissionLevel.LEVEL_3_MODIFICATION,
 
     # Critical (Level 4)
     "delete_file": PermissionLevel.LEVEL_4_CRITICAL,

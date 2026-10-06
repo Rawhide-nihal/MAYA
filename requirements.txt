@@ -10,12 +10,17 @@ psutil>=5.9.0
 pywin32>=306; sys_platform == 'win32'
 pyperclip>=1.8.2
 pillow>=10.0.0
+pywinauto>=0.6.9; sys_platform == 'win32'
+winrt-Windows.Media.Ocr>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Graphics.Imaging>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Storage.Streams>=3.2.1; sys_platform == 'win32'
 
 # Local Voice Engine
 pyttsx3>=2.90
 
 # Machine Learning & LoRA Training Stack
 numpy>=1.26.0
+scikit-learn>=1.4.0
 safetensors>=0.4.0
 transformers>=4.38.0
 
@@ -25,3 +30,19 @@ transformers>=4.38.0
 # HTTP & Web Inspection
 requests>=2.31.0
 urllib3>=2.0.0
+
+
+# Optional voice dependencies live in requirements-voice.txt.
+# Core/chat must install independently of Python-version-specific voice packages.
+SpeechRecognition>=3.10.0
+
+# Browser parsing
+beautifulsoup4>=4.12.0
+
+
+# Document & Attachment Intelligence
+pypdf>=5.0.0
+pdfplumber>=0.11.0
+python-docx>=1.1.0
+python-pptx>=1.0.0
+openpyxl>=3.1.0

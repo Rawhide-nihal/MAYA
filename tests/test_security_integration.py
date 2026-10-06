@@ -11,10 +11,13 @@ import unittest
 import json
 import time
 import hmac
+import io
+import threading
 from pathlib import Path
 
-from maya_server import app, AUTH_TOKEN, permissions, planner, ledger
+from maya_server import app, AUTH_TOKEN, permissions, planner, ledger, communication_bridge, unified_context
 from security.permissions.tier import PermissionLevel, PermissionManager, hash_arguments
+from agents.communication.bridge import CommunicationBridge
 
 class TestSecurityIntegration(unittest.TestCase):
     def setUp(self):
@@ -65,7 +68,12 @@ class TestSecurityIntegration(unittest.TestCase):
 
     # 5. Trusted Origin headers are allowed
     def test_trusted_origin_allowed(self):
-        for origin in ["http://localhost:5173", "http://127.0.0.1:5173", "app://maya"]:
+        for origin in [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "app://maya",
+            "chrome-extension://cbffklcgjeagclgldpkiflcbgbmjgohh"
+        ]:
             headers = {
                 "X-Maya-Token": AUTH_TOKEN,
                 "Origin": origin,
@@ -161,6 +169,350 @@ class TestSecurityIntegration(unittest.TestCase):
         # Must be rejected because args_hash does not match!
         self.assertFalse(tampered_dec.granted)
         self.assertTrue(tampered_dec.requires_confirmation)
+
+    def test_send_communication_requires_exact_confirmation(self):
+        test_pm = PermissionManager(PermissionLevel.LEVEL_2_SAFE_ACTION)
+        original_args = {
+            "service": "gmail",
+            "recipient": "friend@example.com",
+            "message": "Original message",
+            "profile": "main"
+        }
+
+        decision = test_pm.check_permission("send_communication", original_args)
+        self.assertFalse(decision.granted)
+        self.assertTrue(decision.requires_confirmation)
+
+        token = test_pm.resolve_confirmation(decision.confirmation_id, approved=True)
+        self.assertIsNotNone(token)
+
+        tampered_args = dict(original_args)
+        tampered_args["recipient"] = "different@example.com"
+        tampered = test_pm.check_permission("send_communication", tampered_args, token=token)
+
+        self.assertFalse(tampered.granted)
+        self.assertTrue(tampered.requires_confirmation)
+
+        attachment_original = dict(original_args)
+        attachment_original["attachment_path"] = "D:/MAYA/capture-a.png"
+        attachment_decision = test_pm.check_permission(
+            "send_communication", attachment_original
+        )
+        attachment_token = test_pm.resolve_confirmation(
+            attachment_decision.confirmation_id, approved=True
+        )
+        attachment_tampered = dict(attachment_original)
+        attachment_tampered["attachment_path"] = "D:/MAYA/different-secret.png"
+        attachment_replay = test_pm.check_permission(
+            "send_communication",
+            attachment_tampered,
+            token=attachment_token
+        )
+        self.assertFalse(attachment_replay.granted)
+        self.assertTrue(attachment_replay.requires_confirmation)
+
+        read_reply_args = {
+            "service": "whatsapp",
+            "recipient": "Niteesh",
+            "message": "I'll call in 10 minutes",
+            "profile": "main"
+        }
+        read_reply_decision = test_pm.check_permission(
+            "read_and_reply_communication",
+            read_reply_args
+        )
+        self.assertTrue(read_reply_decision.requires_confirmation)
+        read_reply_token = test_pm.resolve_confirmation(
+            read_reply_decision.confirmation_id,
+            approved=True
+        )
+        tampered_read_reply = dict(read_reply_args)
+        tampered_read_reply["message"] = "Send me your password"
+        tampered_read_reply_decision = test_pm.check_permission(
+            "read_and_reply_communication",
+            tampered_read_reply,
+            token=read_reply_token
+        )
+        self.assertFalse(tampered_read_reply_decision.granted)
+        self.assertTrue(tampered_read_reply_decision.requires_confirmation)
+
+    def test_attachment_upload_requires_auth_and_registers_context(self):
+        unauth = self.client.post(
+            "/api/attachments",
+            data={"file": (io.BytesIO(b"hello maya"), "note.txt")},
+            content_type="multipart/form-data"
+        )
+        self.assertEqual(unauth.status_code, 401)
+
+        auth = self.client.post(
+            "/api/attachments",
+            headers={"X-Maya-Token": AUTH_TOKEN},
+            data={"file": (io.BytesIO(b"hello maya"), "note.txt")},
+            content_type="multipart/form-data"
+        )
+        self.assertEqual(auth.status_code, 200)
+        data = auth.get_json()
+        self.assertTrue(data.get("success"))
+        self.assertEqual(data.get("name"), "note.txt")
+        self.assertIn("text_extraction", data.get("capabilities", []))
+
+        ctx_unauth = self.client.get("/api/context")
+        self.assertEqual(ctx_unauth.status_code, 401)
+
+        ctx = self.client.get("/api/context", headers={"X-Maya-Token": AUTH_TOKEN})
+        self.assertEqual(ctx.status_code, 200)
+        ctx_data = ctx.get_json()
+        self.assertTrue(ctx_data.get("attachments"))
+
+    def test_current_chat_command_dispatches_only_to_bound_tab(self):
+        bridge = CommunicationBridge()
+        holder = {}
+
+        command = {
+            "service": "whatsapp",
+            "action": "compose",
+            "recipient": "current chat",
+            "message": "",
+            "target_tab_id": 42,
+        }
+
+        def submit():
+            holder["result"] = bridge.submit(command, timeout=3.0)
+
+        worker = threading.Thread(target=submit, daemon=True)
+        worker.start()
+
+        # Wrong WhatsApp tab must not receive a command bound to tab 42.
+        wrong = None
+        for _ in range(20):
+            wrong = bridge.next_command("whatsapp", tab_id=99)
+            if wrong is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNone(wrong)
+
+        correct = bridge.next_command("whatsapp", tab_id=42)
+        self.assertIsNotNone(correct)
+        self.assertEqual(correct["recipient"], "current chat")
+        self.assertNotIn("target_tab_id", correct)
+
+        bridge.complete(correct["command_id"], {
+            "success": True,
+            "verified": True,
+            "prepared": True,
+            "sent": False,
+        })
+        worker.join(timeout=1.5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder.get("result", {}).get("success"))
+
+    def test_communication_attachment_is_bound_to_active_dispatched_command(self):
+        attachment = unified_context.session_dir / "bridge_test.txt"
+        attachment.parent.mkdir(parents=True, exist_ok=True)
+        attachment.write_text("command-bound attachment", encoding="utf-8")
+
+        command = {
+            "service": "whatsapp",
+            "action": "compose",
+            "recipient": "current chat",
+            "message": "",
+            "profile": "main",
+            "attachment_path": str(attachment),
+        }
+        holder = {}
+
+        def submit_command():
+            holder["result"] = communication_bridge.submit(command, timeout=5.0)
+
+        worker = threading.Thread(target=submit_command, daemon=True)
+        worker.start()
+
+        dispatched = None
+        for _ in range(20):
+            response = self.client.get(
+                "/api/communication/next?service=whatsapp",
+                headers={"X-Maya-Token": AUTH_TOKEN}
+            )
+            self.assertEqual(response.status_code, 200)
+            dispatched = response.get_json().get("command")
+            if dispatched:
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(dispatched)
+        command_id = dispatched["command_id"]
+        self.assertTrue(dispatched.get("has_attachment"))
+        self.assertEqual(dispatched.get("attachment_name"), "bridge_test.txt")
+        self.assertNotIn("attachment_path", dispatched)
+
+        unauthorized = self.client.get(
+            f"/api/communication/attachment/{command_id}"
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        fetched = self.client.get(
+            f"/api/communication/attachment/{command_id}",
+            headers={"X-Maya-Token": AUTH_TOKEN}
+        )
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.data, b"command-bound attachment")
+
+        completed = self.client.post(
+            "/api/communication/result",
+            headers=self.auth_headers,
+            json={
+                "command_id": command_id,
+                "result": {
+                    "success": True,
+                    "verified": True,
+                    "prepared": True,
+                    "sent": False
+                }
+            }
+        )
+        self.assertEqual(completed.status_code, 200)
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder.get("result", {}).get("success"))
+
+        after_completion = self.client.get(
+            f"/api/communication/attachment/{command_id}",
+            headers={"X-Maya-Token": AUTH_TOKEN}
+        )
+        self.assertEqual(after_completion.status_code, 404)
+
+    def test_contact_search_api_requires_auth(self):
+        unauth = self.client.get(
+            "/api/communication/search?service=whatsapp&q=Niteesh"
+        )
+        self.assertEqual(unauth.status_code, 401)
+
+        communication_bridge.update_contacts(
+            "whatsapp",
+            [{"name": "Nitheesh Kumar", "type": "contact"}],
+            source="security_test"
+        )
+        auth = self.client.get(
+            "/api/communication/search?service=whatsapp&q=Nithees%20Kumar&type=contact",
+            headers=self.auth_headers
+        )
+        self.assertEqual(auth.status_code, 200)
+        payload = auth.get_json()
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["result"]["matched"])
+        self.assertEqual(payload["result"]["name"], "Nitheesh Kumar")
+
+    def test_contact_index_api_requires_auth(self):
+        unauthorized = self.client.post(
+            "/api/communication/contacts",
+            json={
+                "service": "whatsapp",
+                "contacts": ["Private Contact"]
+            }
+        )
+        self.assertEqual(unauthorized.status_code, 401)
+
+        authorized = self.client.post(
+            "/api/communication/contacts",
+            headers=self.auth_headers,
+            json={
+                "service": "whatsapp",
+                "contacts": ["Private Contact"],
+                "source": "security_test"
+            }
+        )
+        self.assertEqual(authorized.status_code, 200)
+        data = authorized.get_json()
+        self.assertTrue(data.get("success"))
+
+        listed = self.client.get(
+            "/api/communication/contacts?service=whatsapp",
+            headers={"X-Maya-Token": AUTH_TOKEN}
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(listed.get_json().get("success"))
+
+    def test_browser_action_queue_requires_auth_and_completes_exact_action(self):
+        unauth_next = self.client.get("/api/browser/action/next")
+        self.assertEqual(unauth_next.status_code, 401)
+
+        unauth_result = self.client.post(
+            "/api/browser/action/result",
+            json={
+                "action_id": "fake",
+                "result": {"success": True, "verified": True}
+            }
+        )
+        self.assertEqual(unauth_result.status_code, 401)
+
+        holder = {}
+
+        def submit_action():
+            holder["result"] = communication_bridge.submit_browser_action({
+                "type": "focus_service",
+                "service": "whatsapp",
+                "url": "https://web.whatsapp.com/",
+                "force_new": False,
+            }, timeout=4.0)
+
+        worker = threading.Thread(target=submit_action, daemon=True)
+        worker.start()
+
+        action = None
+        for _ in range(30):
+            response = self.client.get(
+                "/api/browser/action/next",
+                headers={"X-Maya-Token": AUTH_TOKEN}
+            )
+            self.assertEqual(response.status_code, 200)
+            action = response.get_json().get("action")
+            if action:
+                break
+            time.sleep(0.03)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action["type"], "focus_service")
+        self.assertEqual(action["service"], "whatsapp")
+        self.assertFalse(action["force_new"])
+
+        wrong_id = self.client.post(
+            "/api/browser/action/result",
+            headers=self.auth_headers,
+            json={
+                "action_id": "not-the-real-action",
+                "result": {"success": True, "verified": True}
+            }
+        )
+        self.assertEqual(wrong_id.status_code, 404)
+
+        completed = self.client.post(
+            "/api/browser/action/result",
+            headers=self.auth_headers,
+            json={
+                "action_id": action["action_id"],
+                "result": {
+                    "success": True,
+                    "verified": True,
+                    "reused_existing": True,
+                    "tab_id": 77
+                }
+            }
+        )
+        self.assertEqual(completed.status_code, 200)
+
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder.get("result", {}).get("success"))
+        self.assertTrue(holder["result"].get("reused_existing"))
+        self.assertEqual(holder["result"].get("tab_id"), 77)
+
+    def test_browser_context_rejects_unauthorized_update(self):
+        bad = self.client.post(
+            "/api/browser/context",
+            headers={"X-Maya-Token": "bad-token", "Content-Type": "application/json"},
+            json={"title": "Secret", "url": "https://example.com"}
+        )
+        self.assertEqual(bad.status_code, 401)
 
     # 11. Plan Resume Security: Expired Token Rejection
     def test_expired_token_rejection(self):

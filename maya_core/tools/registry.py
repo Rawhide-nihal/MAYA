@@ -155,6 +155,7 @@ class ToolRegistry:
         diagnostics=None,
         browser=None,
         vision=None,
+        communication=None,
         memory=None,
         ledger=None
     ) -> None:
@@ -177,6 +178,9 @@ class ToolRegistry:
         if vision is None:
             from agents.vision.agent import VisionAgent
             vision = VisionAgent()
+        if communication is None:
+            from agents.communication.agent import CommunicationAgent
+            communication = CommunicationAgent(windows=windows)
         if memory is None:
             from memory.store import MemoryStore
             memory = MemoryStore()
@@ -195,7 +199,14 @@ class ToolRegistry:
             "list_processes": lambda filter=None, **kw: {"success": True, "processes": windows.list_processes(limit=15), "verified": True},
             "get_recent_actions": lambda limit=15, **kw: {"success": True, "actions": ledger.get_recent_actions(limit=limit), "verified": True},
             "search_memory": lambda query, **kw: {"success": True, "results": memory.search_relevant_memories(query), "verified": True},
-            "open_application": lambda application, path=None, **kw: windows.launch_application(application),
+            "open_file": lambda filepath, **kw: windows.open_file(filepath),
+            "copy_file_to_clipboard": lambda filepath, **kw: windows.copy_file_to_clipboard(filepath),
+            "open_application": lambda application, path=None, profile=None, force_new=False, **kw: windows.launch_application(
+                application,
+                arguments=[path] if path else None,
+                profile=profile,
+                force_new=bool(force_new),
+            ),
             "open_application_and_inspect": lambda application, project_path=None, **kw: {
                 "success": windows.launch_application(application).get("success", False),
                 "application": application,
@@ -210,6 +221,56 @@ class ToolRegistry:
             "analyze_screen": lambda **kw: vision.analyze_screen(),
             "open_url": lambda url, **kw: browser.open_url(url),
             "search_web": lambda query, **kw: browser.search_web(query),
+            "inspect_communication_contact": lambda service="whatsapp", query="", profile="main", record_type=None, **kw: communication.inspect_contact(
+                service=service,
+                query=query,
+                profile=profile,
+                record_type=record_type
+            ),
+            "lookup_communication_contact": lambda service="whatsapp", query="", detail=None, record_type=None, **kw: communication.lookup_contact(
+                service=service,
+                query=query,
+                detail=detail,
+                record_type=record_type
+            ),
+            "read_communication_messages": lambda service="whatsapp", recipient="", limit=1, profile="main", incoming_only=False, **kw: communication.read_messages(
+                recipient=recipient,
+                limit=limit,
+                service=service,
+                profile=profile,
+                incoming_only=bool(incoming_only)
+            ),
+            "open_communication_service": lambda service="whatsapp", profile="main", force_new=False, **kw: communication.open_service(
+                service=service,
+                profile=profile,
+                force_new=bool(force_new)
+            ),
+            "sync_communication_contacts": lambda service="whatsapp", profile="main", **kw: communication.sync_contacts(
+                service=service,
+                profile=profile
+            ),
+            "prepare_communication": lambda service, recipient, message, subject=None, profile="main", attachment_path=None, **kw: communication.prepare(
+                service=service,
+                recipient=recipient,
+                message=message,
+                subject=subject,
+                profile=profile,
+                attachment_path=attachment_path
+            ),
+            "send_communication": lambda service, recipient, message, subject=None, profile="main", attachment_path=None, **kw: communication.send(
+                service=service,
+                recipient=recipient,
+                message=message,
+                subject=subject,
+                profile=profile,
+                attachment_path=attachment_path
+            ),
+            "read_and_reply_communication": lambda service="whatsapp", recipient="", message="", profile="main", **kw: communication.read_and_reply(
+                service=service,
+                recipient=recipient,
+                message=message,
+                profile=profile
+            ),
             "start_timer": lambda duration_seconds, label="Timer", **kw: windows.start_timer(duration_seconds, label=label),
             "set_reminder": lambda message, time_expression="now", **kw: windows.set_reminder(message, time_expression=time_expression),
             "store_memory": lambda category, key, value, **kw: {"success": True, "saved": memory.save_semantic_memory(category, key, value), "verified": True},
@@ -337,6 +398,49 @@ def build_default_tool_registry() -> ToolRegistry:
     ))
 
     registry.register(ToolSchema(
+        name="inspect_communication_contact",
+        description="Opens the exact WhatsApp contact/group live, inspects details exposed by WhatsApp Web, and enriches MAYA's private local record.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("query", "string", "Exact contact or group name", required=True),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main"),
+            ToolParameter("record_type", "string", "Optional filter: contact or group", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="lookup_communication_contact",
+        description="Looks up a person/group and locally stored details in MAYA's private WhatsApp/Telegram index without sending anything.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service, normally whatsapp", required=False, default="whatsapp"),
+            ToolParameter("query", "string", "Contact or group name/number to look up", required=True),
+            ToolParameter("detail", "string", "Optional requested detail such as phone, jid, type, or all", required=False),
+            ToolParameter("record_type", "string", "Optional filter: contact or group", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="read_communication_messages",
+        description="Reads the latest visible messages live from a specified authenticated WhatsApp conversation without sending anything.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("recipient", "string", "Exact synced contact/group name or 'current chat'", required=True),
+            ToolParameter("limit", "integer", "Number of latest visible messages to read (1-20)", required=False, default=1),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main"),
+            ToolParameter("incoming_only", "boolean", "When true, only return incoming message bubbles from the other party/group", required=False, default=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
         name="search_memory",
         description="Searches long-term semantic and episodic memory for relevant facts or preferences.",
         category="memory",
@@ -349,12 +453,72 @@ def build_default_tool_registry() -> ToolRegistry:
 
     # 2. Safe Actions (Level 2)
     registry.register(ToolSchema(
+        name="open_file",
+        description="Opens a local file with the Windows associated application. Accepts exact paths or recent-file references such as 'latest screenshot', 'recent PNG', or 'latest file'.",
+        category="filesystem",
+        parameters=[
+            ToolParameter("filepath", "string", "File path or recent-file reference", required=True)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="copy_file_to_clipboard",
+        description="Places the actual local file on the Windows file clipboard so it can be pasted with Ctrl+V. Accepts exact paths or recent-file references.",
+        category="filesystem",
+        parameters=[
+            ToolParameter("filepath", "string", "File path or recent-file reference", required=True)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="open_communication_service",
+        description="Focuses an existing authenticated Gmail/WhatsApp/Telegram browser tab, creating a new tab only when needed or explicitly requested.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main"),
+            ToolParameter("force_new", "boolean", "Force creation of a new service tab", required=False, default=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="sync_communication_contacts",
+        description="Synchronizes contacts/chats from the authenticated WhatsApp Web UI into MAYA's private local contact index.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
         name="open_application",
         description="Launches or focuses an authorized application executable and verifies its process launch.",
         category="windows",
         parameters=[
-            ToolParameter("application", "string", "Application name (e.g. 'Visual Studio Code', 'Notepad')", required=True),
-            ToolParameter("path", "string", "Optional target file or workspace directory to open", required=False)
+            ToolParameter("application", "string", "Application name (e.g. 'Visual Studio Code', 'Google Chrome', 'Notepad')", required=True),
+            ToolParameter("path", "string", "Optional target file or workspace directory to open", required=False),
+            ToolParameter(
+                "profile",
+                "string",
+                "Optional browser profile hint such as 'main', a Chrome profile name, directory, or signed-in account email",
+                required=False
+            ),
+            ToolParameter(
+                "force_new",
+                "boolean",
+                "Launch a new instance/window instead of reusing an existing one",
+                required=False,
+                default=False
+            )
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
         undo_available=False
@@ -465,6 +629,52 @@ def build_default_tool_registry() -> ToolRegistry:
             ToolParameter("query", "string", "Search query", required=True)
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="prepare_communication",
+        description="Prepares but does not send a message or email in the user's authenticated Gmail, WhatsApp, or Telegram web session.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
+            ToolParameter("recipient", "string", "Exact email, phone/contact name, or Telegram username/contact", required=True),
+            ToolParameter("message", "string", "Optional message body to prepare when sending an attachment", required=False, default=""),
+            ToolParameter("subject", "string", "Optional Gmail subject", required=False),
+            ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
+            ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="send_communication",
+        description="Sends a message or email from the user's authenticated Gmail, WhatsApp, or Telegram web session after permission approval and verifies the send state.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
+            ToolParameter("recipient", "string", "Exact email, phone/contact name, or Telegram username/contact", required=True),
+            ToolParameter("message", "string", "Optional message body to send when an attachment is present", required=False, default=""),
+            ToolParameter("subject", "string", "Optional Gmail subject", required=False),
+            ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
+            ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_3_MODIFICATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="read_and_reply_communication",
+        description="Reads the latest visible WhatsApp message from a specified chat and then sends the user's explicit reply. The external send requires exact confirmation.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("recipient", "string", "Exact synced contact or group name", required=True),
+            ToolParameter("message", "string", "Exact reply text requested by the user", required=True),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
+        ],
+        permission_level=PermissionLevel.LEVEL_3_MODIFICATION,
         undo_available=False
     ))
 

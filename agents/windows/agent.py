@@ -4,6 +4,8 @@ Autonomous interaction with Windows applications, windows, processes, and genuin
 Uses deterministic priority: native APIs -> CLI/PowerShell -> UI Automation.
 """
 import os
+import re
+import json
 import sys
 import subprocess
 import shutil
@@ -12,6 +14,8 @@ import winreg
 import psutil
 import ctypes
 import threading
+from pathlib import Path
+import struct
 from typing import Dict, Any, List, Optional
 from maya_core.models.hardware_detector import get_real_gpu_metrics
 
@@ -19,8 +23,10 @@ try:
     import win32gui
     import win32con
     import win32process
+    import win32clipboard
     HAS_WIN32 = True
 except ImportError:
+    win32clipboard = None
     HAS_WIN32 = False
 
 try:
@@ -32,6 +38,401 @@ except ImportError:
 class WindowsAgent:
     def __init__(self):
         pass
+
+    def _chrome_user_data_dir(self) -> str:
+        return os.path.join(
+            os.environ.get("LOCALAPPDATA", ""),
+            "Google",
+            "Chrome",
+            "User Data"
+        )
+
+    def _load_chrome_profile_state(self) -> Dict[str, Any]:
+        """Read Chrome's local profile metadata without exposing it outside the PC."""
+        local_state_path = os.path.join(self._chrome_user_data_dir(), "Local State")
+        if not os.path.exists(local_state_path):
+            return {}
+        try:
+            with open(local_state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def resolve_chrome_profile(self, profile_hint: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Resolve the exact Chrome profile MAYA should use.
+
+        For user aliases such as main/default/primary, an explicitly configured
+        local profile is authoritative. MAYA does not silently replace it with
+        Chrome's last-used profile.
+        """
+        state = self._load_chrome_profile_state()
+        profile_state = state.get("profile", {}) if isinstance(state, dict) else {}
+        info_cache = profile_state.get("info_cache", {}) if isinstance(profile_state, dict) else {}
+        if not isinstance(info_cache, dict):
+            info_cache = {}
+
+        raw_hint = (profile_hint or "").strip()
+        hint = raw_hint.lower()
+
+        main_aliases = {
+            "", "main", "main account", "main profile",
+            "primary", "primary account", "primary profile",
+            "default", "default account", "default profile",
+            "my account", "my main account", "my default",
+            "my default account", "my default profile"
+        }
+
+        configured_profile = ""
+        configured_account = ""
+        try:
+            from maya_core.config import settings
+            configured_profile = str(settings.get("chrome_main_profile", "") or "").strip()
+            configured_account = str(settings.get("chrome_main_account", "") or "").strip()
+        except Exception:
+            pass
+
+        env_override = os.environ.get("MAYA_CHROME_MAIN_PROFILE", "").strip()
+
+        # Any user-facing "main/default/primary" alias means the explicitly
+        # selected local MAYA Chrome profile first.
+        if hint in main_aliases:
+            preferred = configured_profile or env_override
+            if preferred:
+                preferred_lower = preferred.lower()
+                for directory, meta in info_cache.items():
+                    meta = meta if isinstance(meta, dict) else {}
+                    if preferred_lower in {
+                        directory.lower(),
+                        str(meta.get("name", "")).strip().lower(),
+                        str(meta.get("shortcut_name", "")).strip().lower(),
+                    }:
+                        return {
+                            "success": True,
+                            "profile_directory": directory,
+                            "profile_name": meta.get("name") or directory,
+                            "resolution": "configured_main_profile",
+                        }
+
+                # A configured directory can still be valid before Local State
+                # refreshes its info_cache entry.
+                candidate_dir = os.path.join(self._chrome_user_data_dir(), preferred)
+                if os.path.isdir(candidate_dir):
+                    return {
+                        "success": True,
+                        "profile_directory": preferred,
+                        "profile_name": preferred,
+                        "resolution": "configured_main_profile_directory",
+                    }
+
+            if configured_account:
+                account_lower = configured_account.lower()
+                for directory, meta in info_cache.items():
+                    meta = meta if isinstance(meta, dict) else {}
+                    candidates = {
+                        str(meta.get("user_name", "")).strip().lower(),
+                        str(meta.get("gaia_name", "")).strip().lower(),
+                    }
+                    if account_lower in candidates:
+                        return {
+                            "success": True,
+                            "profile_directory": directory,
+                            "profile_name": meta.get("name") or directory,
+                            "resolution": "configured_main_account",
+                        }
+
+            # If the user explicitly said "default" and no MAYA preference has
+            # been selected, use Chrome's real Default directory before guessing
+            # from recency.
+            if hint in {"default", "default profile", "default account", "my default", "my default profile", "my default account"}:
+                default_path = os.path.join(self._chrome_user_data_dir(), "Default")
+                if "Default" in info_cache or os.path.isdir(default_path):
+                    meta = info_cache.get("Default", {})
+                    return {
+                        "success": True,
+                        "profile_directory": "Default",
+                        "profile_name": meta.get("name") or "Default",
+                        "resolution": "chrome_default_directory",
+                    }
+
+        # Explicit directory/profile/account/email hint.
+        if hint and hint not in main_aliases:
+            for directory, meta in info_cache.items():
+                meta = meta if isinstance(meta, dict) else {}
+                candidates = [
+                    directory,
+                    str(meta.get("name", "")),
+                    str(meta.get("shortcut_name", "")),
+                    str(meta.get("user_name", "")),
+                    str(meta.get("gaia_name", "")),
+                ]
+                if any(hint == value.strip().lower() for value in candidates if value):
+                    return {
+                        "success": True,
+                        "profile_directory": directory,
+                        "profile_name": meta.get("name") or directory,
+                        "resolution": "explicit_hint",
+                    }
+
+        # Only when MAYA has no explicit preference: fall back to Chrome state.
+        if hint in main_aliases:
+            last_used = profile_state.get("last_used")
+            if last_used in info_cache:
+                meta = info_cache.get(last_used, {})
+                return {
+                    "success": True,
+                    "profile_directory": last_used,
+                    "profile_name": meta.get("name") or last_used,
+                    "resolution": "chrome_last_used_fallback",
+                }
+
+            if "Default" in info_cache or os.path.isdir(os.path.join(self._chrome_user_data_dir(), "Default")):
+                meta = info_cache.get("Default", {})
+                return {
+                    "success": True,
+                    "profile_directory": "Default",
+                    "profile_name": meta.get("name") or "Default",
+                    "resolution": "chrome_default_fallback",
+                }
+
+        return {
+            "success": False,
+            "error": (
+                f"Could not resolve Chrome profile hint '{raw_hint or 'main'}'. "
+                "Run scripts\\configure_chrome_main_profile.py to select it explicitly."
+            )
+        }
+
+    def _recent_file_roots(self) -> List[str]:
+        """User-facing locations MAYA may inspect for recent-file references."""
+        from maya_core.config import get_user_screenshots_dir
+
+        home = Path.home()
+        candidates = [
+            get_user_screenshots_dir(),
+            home / "Downloads",
+            home / "Desktop",
+            home / "Documents",
+            home / "Pictures",
+        ]
+        roots: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            try:
+                resolved = str(Path(candidate).expanduser().resolve())
+            except Exception:
+                resolved = str(candidate)
+            key = os.path.normcase(resolved)
+            if key in seen or not os.path.isdir(resolved):
+                continue
+            seen.add(key)
+            roots.append(resolved)
+        return roots
+
+    def resolve_file_reference(self, reference: str) -> Dict[str, Any]:
+        """
+        Resolve either a real path or a natural recent-file selector.
+
+        Examples: latest screenshot, recent PNG, most recent JPEG, latest image,
+        latest file. Search is intentionally limited to normal user folders.
+        """
+        raw = str(reference or "").strip().strip('"')
+        if not raw:
+            return {"success": False, "verified": False, "error": "File reference is empty."}
+
+        candidate = Path(raw).expanduser()
+        if candidate.is_file():
+            resolved = str(candidate.resolve())
+            return {
+                "success": True,
+                "verified": True,
+                "path": resolved,
+                "name": Path(resolved).name,
+                "resolution": "explicit_path",
+            }
+
+        lower = " ".join(raw.lower().split())
+        screenshot_terms = {"screenshot", "screen shot", "screen capture"}
+        image_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+
+        extensions: Optional[set[str]] = None
+        roots = self._recent_file_roots()
+
+        if any(term in lower for term in screenshot_terms):
+            from maya_core.config import get_user_screenshots_dir
+            roots = [str(get_user_screenshots_dir())]
+            extensions = image_exts
+        elif "png" in lower:
+            extensions = {".png"}
+        elif "jpeg" in lower or "jpg" in lower:
+            extensions = {".jpg", ".jpeg"}
+        elif "image" in lower or "picture" in lower or "photo" in lower:
+            extensions = image_exts
+
+        recent_words = ("latest", "recent", "most recent", "newest", "last")
+        if not any(word in lower for word in recent_words) and not any(
+            term in lower for term in screenshot_terms
+        ):
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"File does not exist and is not a recognized recent-file reference: {raw}",
+            }
+
+        matches: List[tuple[float, str]] = []
+        for root in roots:
+            try:
+                for base, dirs, files in os.walk(root):
+                    # Keep scans bounded and avoid descending through huge/cache trees.
+                    relative_depth = Path(base).relative_to(Path(root)).parts
+                    if len(relative_depth) >= 3:
+                        dirs[:] = []
+                    for name in files:
+                        path = os.path.join(base, name)
+                        ext = Path(name).suffix.lower()
+                        if extensions is not None and ext not in extensions:
+                            continue
+                        try:
+                            modified = os.path.getmtime(path)
+                        except OSError:
+                            continue
+                        matches.append((modified, path))
+            except (OSError, ValueError):
+                continue
+
+        if not matches:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"No matching recent file was found for '{raw}'.",
+            }
+
+        matches.sort(key=lambda item: item[0], reverse=True)
+        resolved = str(Path(matches[0][1]).resolve())
+        return {
+            "success": True,
+            "verified": True,
+            "path": resolved,
+            "name": Path(resolved).name,
+            "modified_at": matches[0][0],
+            "resolution": "recent_file",
+            "query": raw,
+        }
+
+    def open_file(self, filepath: str) -> Dict[str, Any]:
+        resolved = self.resolve_file_reference(filepath)
+        if not resolved.get("success"):
+            return resolved
+
+        path = resolved["path"]
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                opener = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen(
+                    [opener, path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+            return {
+                **resolved,
+                "success": True,
+                "verified": os.path.isfile(path),
+                "opened": True,
+                "message": f"Opened {Path(path).name}",
+            }
+        except Exception as exc:
+            return {
+                **resolved,
+                "success": False,
+                "verified": False,
+                "opened": False,
+                "error": f"Could not open file: {exc}",
+            }
+
+    def copy_file_to_clipboard(self, filepath: str) -> Dict[str, Any]:
+        """Put an actual file object on the Windows clipboard (CF_HDROP)."""
+        resolved = self.resolve_file_reference(filepath)
+        if not resolved.get("success"):
+            return resolved
+        path = resolved["path"]
+
+        if sys.platform != "win32" or not HAS_WIN32 or win32clipboard is None:
+            return {
+                **resolved,
+                "success": False,
+                "verified": False,
+                "error": "File clipboard copy requires Windows pywin32 support.",
+            }
+
+        opened = False
+        try:
+            win32clipboard.OpenClipboard()
+            opened = True
+            win32clipboard.EmptyClipboard()
+
+            # CF_HDROP requires a DROPFILES header followed by a double-null
+            # terminated UTF-16LE list of fully-qualified paths.
+            file_list = path + "\0\0"
+            payload = (
+                struct.pack(
+                    "<IiiII",
+                    20,   # pFiles offset = sizeof(DROPFILES)
+                    0,    # pt.x
+                    0,    # pt.y
+                    0,    # fNC
+                    1,    # fWide (Unicode)
+                )
+                + file_list.encode("utf-16le")
+            )
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, payload)
+        except Exception as exc:
+            return {
+                **resolved,
+                "success": False,
+                "verified": False,
+                "error": f"Could not place file on Windows clipboard: {exc}",
+            }
+        finally:
+            if opened:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+
+        verify_open = False
+        verified = False
+        try:
+            win32clipboard.OpenClipboard()
+            verify_open = True
+            copied = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+            normalized = os.path.normcase(os.path.abspath(path))
+            verified = any(
+                os.path.normcase(os.path.abspath(str(item))) == normalized
+                for item in (copied or ())
+            )
+        except Exception:
+            verified = False
+        finally:
+            if verify_open:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+
+        return {
+            **resolved,
+            "success": verified,
+            "verified": verified,
+            "clipboard_format": "CF_HDROP",
+            "message": (
+                f"Copied {Path(path).name} to the Windows file clipboard."
+                if verified else
+                "Windows accepted the clipboard operation, but MAYA could not verify the file payload."
+            ),
+        }
 
     def find_application_path(self, app_name: str) -> Optional[str]:
         app_lower = app_name.lower().strip()
@@ -98,26 +499,242 @@ class WindowsAgent:
         general = shutil.which(app_name) or shutil.which(f"{app_name}.exe")
         return general
 
-    def launch_application(self, app_name: str, arguments: Optional[List[str]] = None, cwd: Optional[str] = None) -> Dict[str, Any]:
+    @staticmethod
+    def _normalize_process_name(value: str) -> str:
+        name = os.path.basename(str(value or "")).strip().lower()
+        if name.endswith(".exe"):
+            name = name[:-4]
+        return re.sub(r"[^a-z0-9]+", "", name)
+
+    def _application_process_aliases(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+    ) -> List[str]:
+        """Return real Windows process-name aliases for a friendly app name."""
+        aliases = set()
+        friendly = self._normalize_process_name(app_name)
+        if friendly:
+            aliases.add(friendly)
+
+        if executable:
+            exe_alias = self._normalize_process_name(executable)
+            if exe_alias:
+                aliases.add(exe_alias)
+
+        lower = str(app_name or "").lower()
+        known = {
+            "google chrome": {"chrome"},
+            "chrome": {"chrome"},
+            "microsoft edge": {"msedge"},
+            "edge": {"msedge"},
+            "visual studio code": {"code"},
+            "vs code": {"code"},
+            "vscode": {"code"},
+            "windows terminal": {"windowsterminal", "wt", "openconsole", "conhost"},
+            "terminal": {"windowsterminal", "wt", "openconsole", "powershell", "pwsh"},
+            "powershell": {"powershell", "pwsh"},
+            "command prompt": {"cmd"},
+            "cmd": {"cmd"},
+            "file explorer": {"explorer"},
+            "explorer": {"explorer"},
+            "notepad": {"notepad"},
+            "calculator": {"calculatorapp", "calculator"},
+        }
+        for key, values in known.items():
+            if key in lower:
+                aliases.update(values)
+
+        return sorted(a for a in aliases if a)
+
+    def _visible_window_matches_application(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+    ) -> bool:
+        if not HAS_WIN32:
+            return False
+
+        aliases = set(self._application_process_aliases(app_name, executable))
+        friendly_terms = {
+            token
+            for token in re.split(r"[^a-z0-9]+", str(app_name or "").lower())
+            if len(token) >= 3 and token not in {"google", "microsoft", "windows"}
+        }
+        matched = False
+
+        def _enum(hwnd, _):
+            nonlocal matched
+            if matched or not win32gui.IsWindowVisible(hwnd):
+                return
+            title = str(win32gui.GetWindowText(hwnd) or "").strip().lower()
+            if not title:
+                return
+
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                proc_name = self._normalize_process_name(psutil.Process(pid).name())
+            except Exception:
+                proc_name = ""
+
+            if proc_name and proc_name in aliases:
+                matched = True
+                return
+
+            if friendly_terms and any(term in title for term in friendly_terms):
+                matched = True
+
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception:
+            return False
+        return matched
+
+    def is_application_running(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+    ) -> bool:
         """
-        Launches an application and strictly verifies the process actually starts.
-        Never reports success if the process or window does not launch.
+        Verify an app by its real executable/process aliases and, where available,
+        a visible top-level Windows window.
+
+        Friendly names such as 'Google Chrome' must resolve to chrome.exe rather
+        than comparing the literal friendly string with the process name.
         """
+        aliases = set(self._application_process_aliases(app_name, executable))
+        if aliases:
+            for p in psutil.process_iter(["name", "exe"]):
+                try:
+                    names = {
+                        self._normalize_process_name(p.info.get("name") or ""),
+                        self._normalize_process_name(p.info.get("exe") or ""),
+                    }
+                    names.discard("")
+                    if aliases.intersection(names):
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+                except Exception:
+                    continue
+
+        return self._visible_window_matches_application(app_name, executable)
+
+    def _wait_for_application(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+        timeout: float = 5.0,
+    ) -> bool:
+        deadline = time.time() + max(0.5, float(timeout))
+        while time.time() < deadline:
+            if self.is_application_running(app_name, executable):
+                return True
+            time.sleep(0.20)
+        return self.is_application_running(app_name, executable)
+
+    def launch_application(
+        self,
+        app_name: str,
+        arguments: Optional[List[str]] = None,
+        cwd: Optional[str] = None,
+        profile: Optional[str] = None,
+        force_new: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Launch an application and verify the real Windows application state.
+
+        Windows applications frequently hand a request to an already-running
+        process and let the short-lived launcher PID exit. That is normal and
+        must not be reported as an application crash.
+        """
+        resolved_profile = None
+        is_chrome = "chrome" in app_name.lower()
+
+        if is_chrome and profile:
+            profile_result = self.resolve_chrome_profile(profile)
+            if not profile_result.get("success"):
+                return {
+                    "success": False,
+                    "application": "Google Chrome",
+                    "verified": False,
+                    "error": profile_result.get("error", "Chrome profile could not be resolved."),
+                }
+            resolved_profile = profile_result
+
+            if not force_new:
+                focused_profile = self.focus_chrome_profile(profile_result["profile_directory"])
+                if focused_profile.get("success"):
+                    return {
+                        "success": True,
+                        "verified": True,
+                        "application": "Google Chrome",
+                        "reused_existing": True,
+                        "focused": True,
+                        "hwnd": focused_profile.get("hwnd"),
+                        "title": focused_profile.get("title"),
+                        "profile_directory": profile_result.get("profile_directory"),
+                        "profile_name": profile_result.get("profile_name"),
+                        "profile_resolution": profile_result.get("resolution"),
+                        "message": (
+                            f"Reused the existing Chrome profile "
+                            f"'{profile_result.get('profile_name')}'."
+                        ),
+                    }
+
+        elif not force_new and self.is_application_running(app_name):
+            focused = self.focus_application(app_name)
+            if focused.get("success"):
+                return {
+                    "success": True,
+                    "verified": True,
+                    "application": app_name,
+                    "reused_existing": True,
+                    "focused": True,
+                    "hwnd": focused.get("hwnd"),
+                    "title": focused.get("title"),
+                    "message": f"Reused the existing {app_name} window.",
+                }
+
         app_path = self.find_application_path(app_name)
         if not app_path:
-            # Fallback to shell start-process
             cmd = ["powershell", "-NoProfile", "-Command", f"Start-Process '{app_name}'"]
             try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                time.sleep(1.2)
-                verified = self.is_application_running(app_name)
+                completed = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    return {
+                        "success": False,
+                        "application": app_name,
+                        "executable": app_name,
+                        "method": "powershell_start",
+                        "verified": False,
+                        "error": f"Windows Start-Process returned exit code {completed.returncode}.",
+                    }
+
+                verified = self._wait_for_application(app_name, app_name, timeout=5.0)
                 return {
                     "success": verified,
                     "application": app_name,
                     "executable": app_name,
                     "method": "powershell_start",
                     "verified": verified,
-                    "message": f"Dispatched launch for '{app_name}'. Verified active: {verified}." if verified else f"Failed to verify '{app_name}' running after launch."
+                    "message": (
+                        f"Successfully launched and verified {app_name}."
+                        if verified else
+                        f"Windows accepted the launch request for '{app_name}', but MAYA could not verify a matching process or visible window."
+                    ),
+                    **({} if verified else {
+                        "error": (
+                            f"Windows accepted the launch request for '{app_name}', "
+                            "but no matching process/window became verifiable."
+                        )
+                    }),
                 }
             except Exception as e:
                 return {
@@ -128,43 +745,94 @@ class WindowsAgent:
                 }
 
         cmd = [app_path]
+
+        if "chrome" in app_name.lower():
+            inferred_profile = profile
+            lowered_app = app_name.lower()
+            if not inferred_profile and any(
+                phrase in lowered_app
+                for phrase in ["main account", "main profile", "primary account", "primary profile"]
+            ):
+                inferred_profile = "main"
+
+            if inferred_profile:
+                profile_result = resolved_profile or self.resolve_chrome_profile(inferred_profile)
+                if not profile_result.get("success"):
+                    return {
+                        "success": False,
+                        "application": "Google Chrome",
+                        "verified": False,
+                        "error": profile_result.get("error", "Chrome profile could not be resolved."),
+                    }
+                resolved_profile = profile_result
+                cmd.append(f"--profile-directory={profile_result['profile_directory']}")
+                if force_new:
+                    cmd.append("--new-window")
+
         if arguments:
             cmd.extend(arguments)
 
         try:
-            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            creationflags = (
+                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                if sys.platform == "win32"
+                else 0
+            )
             proc = subprocess.Popen(
                 cmd,
                 cwd=cwd,
                 creationflags=creationflags,
                 close_fds=True
             )
-            time.sleep(1.2)
-            
-            # Action Verification: check poll and process table
-            is_alive = proc.poll() is None
-            if not is_alive:
-                # Some launchers (like code.cmd) exit immediately after spawning Code.exe
-                is_alive = self.is_application_running(app_name)
 
-            if not is_alive:
+            if resolved_profile and is_chrome:
+                verified = self._wait_for_chrome_profile(
+                    resolved_profile["profile_directory"],
+                    timeout=5.0,
+                )
+            else:
+                verified = self._wait_for_application(app_name, app_path, timeout=5.0)
+            launcher_alive = proc.poll() is None
+
+            if not verified:
                 return {
                     "success": False,
                     "application": app_name,
                     "executable": app_path,
-                    "pid": None,
+                    "pid": proc.pid if launcher_alive else None,
+                    "launcher_pid": proc.pid,
+                    "launcher_alive": launcher_alive,
                     "verified": False,
-                    "error": f"Application binary executed but process did not remain active."
+                    "error": (
+                        "Application launch was dispatched, but MAYA could not verify "
+                        "a matching running process or visible application window."
+                    )
                 }
 
-            return {
+            result = {
                 "success": True,
                 "application": app_name,
                 "executable": app_path,
-                "pid": proc.pid,
+                "pid": proc.pid if launcher_alive else None,
+                "launcher_pid": proc.pid,
+                "launcher_alive": launcher_alive,
                 "verified": True,
+                "verification": "process_or_visible_window",
                 "message": f"Successfully launched and verified {app_name}."
             }
+
+            if not launcher_alive:
+                result["handoff_detected"] = True
+
+            if resolved_profile:
+                result["profile_directory"] = resolved_profile.get("profile_directory")
+                result["profile_name"] = resolved_profile.get("profile_name")
+                result["profile_resolution"] = resolved_profile.get("resolution")
+                result["message"] = (
+                    f"Successfully launched and verified Google Chrome with profile "
+                    f"'{resolved_profile.get('profile_name')}'."
+                )
+            return result
         except Exception as e:
             return {
                 "success": False,
@@ -173,18 +841,6 @@ class WindowsAgent:
                 "verified": False,
                 "error": str(e)
             }
-
-    def is_application_running(self, app_name: str) -> bool:
-        """Verifies if application or related process name is active in the OS."""
-        name_lower = app_name.lower().replace(" ", "")
-        for p in psutil.process_iter(['name']):
-            try:
-                proc_name = p.info['name'].lower().replace(" ", "")
-                if name_lower in proc_name or ("code" in name_lower and "code" in proc_name):
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        return False
 
     def list_processes(self, limit: int = 15, sort_by: str = "memory") -> List[Dict[str, Any]]:
         """List running processes with real CPU and memory usage"""
@@ -236,6 +892,329 @@ class WindowsAgent:
                 return {"success": False, "pid": pid, "verified": False, "error": str(ex)}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def focus_application(self, app_name: str) -> Dict[str, Any]:
+        """Restore/focus a visible window owned by the requested application."""
+        if not HAS_WIN32:
+            return {"success": False, "verified": False, "error": "win32gui not available"}
+
+        executable = self.find_application_path(app_name)
+        aliases = set(self._application_process_aliases(app_name, executable))
+        target_hwnd = None
+        target_title = None
+        target_pid = None
+
+        def _enum(hwnd, _):
+            nonlocal target_hwnd, target_title, target_pid
+            if target_hwnd is not None or not win32gui.IsWindowVisible(hwnd):
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                proc_name = self._normalize_process_name(psutil.Process(pid).name())
+            except Exception:
+                return
+            if proc_name not in aliases:
+                return
+            title = str(win32gui.GetWindowText(hwnd) or "").strip()
+            if not title:
+                return
+            target_hwnd = hwnd
+            target_title = title
+            target_pid = pid
+
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": str(exc)}
+
+        if target_hwnd is None:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"No visible {app_name} window was found to focus.",
+            }
+
+        try:
+            win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+            try:
+                win32gui.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+            return {
+                "success": True,
+                "verified": True,
+                "hwnd": target_hwnd,
+                "pid": target_pid,
+                "title": target_title,
+                "application": app_name,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Failed to restore/focus {app_name}: {exc}",
+            }
+
+    def _chrome_profile_pids(self, profile_directory: str) -> List[int]:
+        target = str(profile_directory or "").strip().casefold()
+        if not target:
+            return []
+        pids: List[int] = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if self._normalize_process_name(proc.info.get("name") or "") != "chrome":
+                    continue
+                cmdline = [str(x) for x in (proc.info.get("cmdline") or [])]
+                for arg in cmdline:
+                    if arg.lower().startswith("--profile-directory="):
+                        value = arg.split("=", 1)[1].strip().strip('"').casefold()
+                        if value == target:
+                            pids.append(int(proc.info["pid"]))
+                            break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+        return pids
+
+    def focus_chrome_profile(self, profile_directory: str) -> Dict[str, Any]:
+        """Focus a visible Chrome window belonging to the exact configured profile."""
+        if not HAS_WIN32:
+            return {"success": False, "verified": False, "error": "win32gui not available"}
+
+        profile_pids = set(self._chrome_profile_pids(profile_directory))
+        if not profile_pids:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Chrome profile '{profile_directory}' is not currently running.",
+            }
+
+        target_hwnd = None
+        target_title = None
+        target_pid = None
+
+        def _enum(hwnd, _):
+            nonlocal target_hwnd, target_title, target_pid
+            if target_hwnd is not None or not win32gui.IsWindowVisible(hwnd):
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                return
+            if pid not in profile_pids:
+                return
+            title = str(win32gui.GetWindowText(hwnd) or "").strip()
+            if not title:
+                return
+            target_hwnd = hwnd
+            target_title = title
+            target_pid = pid
+
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": str(exc)}
+
+        if target_hwnd is None:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"No visible Chrome window for profile '{profile_directory}' was found.",
+            }
+
+        try:
+            win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+            try:
+                win32gui.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+            return {
+                "success": True,
+                "verified": True,
+                "hwnd": target_hwnd,
+                "pid": target_pid,
+                "title": target_title,
+                "profile_directory": profile_directory,
+            }
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": str(exc)}
+
+    def focus_chrome_tab_by_search(
+        self,
+        profile_hint: str,
+        search_text: str,
+        expected_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Real Windows fallback for an already-open Chrome tab.
+
+        Uses Chrome's built-in Tab Search (Ctrl+Shift+A) after focusing the exact
+        configured profile window. This does not require the extension worker to
+        be awake.
+        """
+        if sys.platform != "win32":
+            return {"success": False, "verified": False, "error": "Chrome tab search fallback is Windows-only."}
+
+        profile = self.resolve_chrome_profile(profile_hint)
+        if not profile.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": profile.get("error", "Chrome profile could not be resolved."),
+            }
+
+        focused = self.focus_chrome_profile(profile["profile_directory"])
+        if not focused.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": focused.get("error", "Chrome profile is not currently open."),
+            }
+
+        try:
+            from pywinauto.keyboard import send_keys
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"pywinauto keyboard fallback unavailable: {exc}",
+            }
+
+        old_clipboard = None
+        try:
+            if HAS_CLIPBOARD:
+                try:
+                    old_clipboard = pyperclip.paste()
+                except Exception:
+                    old_clipboard = None
+
+            send_keys("^+a")
+            time.sleep(0.30)
+
+            if HAS_CLIPBOARD:
+                pyperclip.copy(str(search_text))
+                send_keys("^v")
+            else:
+                send_keys(str(search_text), with_spaces=True)
+
+            time.sleep(0.35)
+            send_keys("{ENTER}")
+            time.sleep(0.65)
+
+            hwnd = win32gui.GetForegroundWindow() if HAS_WIN32 else None
+            title = str(win32gui.GetWindowText(hwnd) or "") if hwnd else ""
+            expected = str(expected_title or search_text or "").strip().casefold()
+            verified = bool(title and (not expected or expected in title.casefold()))
+
+            return {
+                "success": verified,
+                "verified": verified,
+                "reused_existing": verified,
+                "focused": verified,
+                "title": title,
+                "hwnd": hwnd,
+                "profile_directory": profile.get("profile_directory"),
+                "profile_name": profile.get("profile_name"),
+                "strategy": "chrome_tab_search",
+                "error": None if verified else (
+                    f"Chrome Tab Search did not activate a verified '{search_text}' tab."
+                ),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Chrome Tab Search fallback failed: {exc}",
+            }
+        finally:
+            if HAS_CLIPBOARD and old_clipboard is not None:
+                try:
+                    pyperclip.copy(old_clipboard)
+                except Exception:
+                    pass
+
+    def open_url_in_chrome_profile(
+        self,
+        profile_hint: str,
+        url: str,
+    ) -> Dict[str, Any]:
+        """Open a URL in a new tab of the exact existing Chrome profile when possible."""
+        if sys.platform != "win32":
+            return {"success": False, "verified": False, "error": "Chrome URL fallback is Windows-only."}
+
+        profile = self.resolve_chrome_profile(profile_hint)
+        if not profile.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": profile.get("error", "Chrome profile could not be resolved."),
+            }
+
+        focused = self.focus_chrome_profile(profile["profile_directory"])
+        if not focused.get("success"):
+            # Chrome/profile is not running. Let the normal launcher start it.
+            launched = self.launch_application(
+                "Google Chrome",
+                arguments=[url],
+                profile=profile_hint,
+                force_new=True,
+            )
+            launched.setdefault("created_new", bool(launched.get("success")))
+            launched.setdefault("strategy", "chrome_process_launch")
+            return launched
+
+        try:
+            from pywinauto.keyboard import send_keys
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": f"pywinauto keyboard unavailable: {exc}"}
+
+        old_clipboard = None
+        try:
+            if HAS_CLIPBOARD:
+                try:
+                    old_clipboard = pyperclip.paste()
+                except Exception:
+                    old_clipboard = None
+
+            send_keys("^t")
+            time.sleep(0.20)
+            if HAS_CLIPBOARD:
+                pyperclip.copy(str(url))
+                send_keys("^v{ENTER}")
+            else:
+                send_keys(str(url), with_spaces=True)
+                send_keys("{ENTER}")
+            time.sleep(0.70)
+
+            hwnd = win32gui.GetForegroundWindow() if HAS_WIN32 else None
+            title = str(win32gui.GetWindowText(hwnd) or "") if hwnd else ""
+            return {
+                "success": True,
+                "verified": True,
+                "created_new": True,
+                "title": title,
+                "hwnd": hwnd,
+                "profile_directory": profile.get("profile_directory"),
+                "profile_name": profile.get("profile_name"),
+                "strategy": "chrome_new_tab_keyboard",
+            }
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": f"Could not open Chrome tab: {exc}"}
+        finally:
+            if HAS_CLIPBOARD and old_clipboard is not None:
+                try:
+                    pyperclip.copy(old_clipboard)
+                except Exception:
+                    pass
+
+    def _wait_for_chrome_profile(self, profile_directory: str, timeout: float = 5.0) -> bool:
+        deadline = time.time() + max(0.5, float(timeout))
+        while time.time() < deadline:
+            if self._chrome_profile_pids(profile_directory):
+                return True
+            time.sleep(0.20)
+        return bool(self._chrome_profile_pids(profile_directory))
 
     def focus_window_by_title(self, query: str) -> Dict[str, Any]:
         """Brings the first matching window to the foreground."""
@@ -306,6 +1285,130 @@ class WindowsAgent:
                 pass
         return False
 
+    def get_explorer_selection(self) -> List[str]:
+        """Return selected File Explorer item paths for the foreground Explorer window when accessible."""
+        if sys.platform != "win32":
+            return []
+        try:
+            import win32com.client
+            foreground = win32gui.GetForegroundWindow() if HAS_WIN32 else None
+            shell = win32com.client.Dispatch("Shell.Application")
+            for window in shell.Windows():
+                try:
+                    hwnd = int(window.HWND)
+                    if foreground and hwnd != foreground:
+                        continue
+                    document = window.Document
+                    selected = document.SelectedItems()
+                    paths = []
+                    for index in range(selected.Count):
+                        item = selected.Item(index)
+                        path = getattr(item, "Path", None)
+                        if path:
+                            paths.append(str(path))
+                    if paths:
+                        return paths
+                except Exception:
+                    continue
+        except Exception:
+            return []
+        return []
+
+    def get_ui_context(self, max_controls: int = 100) -> Dict[str, Any]:
+        """Inspect the foreground app's Windows UI Automation/accessibility tree."""
+        if sys.platform != "win32":
+            return {
+                "success": False,
+                "accessible": False,
+                "error": "Windows UI Automation is only available on Windows."
+            }
+
+        try:
+            from pywinauto import Desktop
+        except Exception as exc:
+            return {
+                "success": False,
+                "accessible": False,
+                "error": f"pywinauto/UI Automation unavailable: {exc}"
+            }
+
+        if not HAS_WIN32:
+            return {
+                "success": False,
+                "accessible": False,
+                "error": "Foreground-window APIs are unavailable."
+            }
+
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            title = win32gui.GetWindowText(hwnd)
+            if not hwnd:
+                return {
+                    "success": False,
+                    "accessible": False,
+                    "error": "No foreground window is available."
+                }
+
+            window = Desktop(backend="uia").window(handle=hwnd)
+            descendants = window.descendants()
+            controls = []
+            seen = set()
+
+            for control in descendants:
+                if len(controls) >= max(1, int(max_controls)):
+                    break
+                try:
+                    info = control.element_info
+                    name = str(getattr(info, "name", "") or "").strip()
+                    control_type = str(getattr(info, "control_type", "") or "").strip()
+                    automation_id = str(getattr(info, "automation_id", "") or "").strip()
+                    class_name = str(getattr(info, "class_name", "") or "").strip()
+                    rect = getattr(info, "rectangle", None)
+                    bounds = None
+                    if rect is not None:
+                        bounds = {
+                            "left": int(rect.left),
+                            "top": int(rect.top),
+                            "right": int(rect.right),
+                            "bottom": int(rect.bottom),
+                        }
+
+                    if not name and control_type not in {"Button", "Edit", "ComboBox", "CheckBox", "RadioButton", "Hyperlink", "MenuItem"}:
+                        continue
+
+                    key = (name, control_type, automation_id, str(bounds))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    controls.append({
+                        "name": name,
+                        "control_type": control_type,
+                        "automation_id": automation_id,
+                        "class_name": class_name,
+                        "bounds": bounds,
+                        "enabled": bool(control.is_enabled()),
+                        "visible": bool(control.is_visible()),
+                    })
+                except Exception:
+                    continue
+
+            return {
+                "success": True,
+                "accessible": True,
+                "window_title": title,
+                "hwnd": hwnd,
+                "control_count": len(controls),
+                "controls": controls,
+                "truncated": len(descendants) > len(controls),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "accessible": False,
+                "error": f"Foreground UI Automation inspection failed: {exc}"
+            }
+
     def list_windows(self) -> List[Dict[str, Any]]:
         """Lists all open windows with title, process name, PID, and geometry."""
         windows = []
@@ -317,10 +1420,16 @@ class WindowsAgent:
                         try:
                             _, pid = win32process.GetWindowThreadProcessId(hwnd)
                             rect = win32gui.GetWindowRect(hwnd)
+                            process_name = None
+                            try:
+                                process_name = psutil.Process(pid).name()
+                            except Exception:
+                                pass
                             windows.append({
                                 "title": title,
                                 "hwnd": hwnd,
                                 "pid": pid,
+                                "process_name": process_name,
                                 "bounds": {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]}
                             })
                         except Exception:
