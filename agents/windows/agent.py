@@ -4,6 +4,7 @@ Autonomous interaction with Windows applications, windows, processes, and genuin
 Uses deterministic priority: native APIs -> CLI/PowerShell -> UI Automation.
 """
 import os
+import re
 import json
 import sys
 import subprocess
@@ -498,6 +499,140 @@ class WindowsAgent:
         general = shutil.which(app_name) or shutil.which(f"{app_name}.exe")
         return general
 
+    @staticmethod
+    def _normalize_process_name(value: str) -> str:
+        name = os.path.basename(str(value or "")).strip().lower()
+        if name.endswith(".exe"):
+            name = name[:-4]
+        return re.sub(r"[^a-z0-9]+", "", name)
+
+    def _application_process_aliases(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+    ) -> List[str]:
+        """Return real Windows process-name aliases for a friendly app name."""
+        aliases = set()
+        friendly = self._normalize_process_name(app_name)
+        if friendly:
+            aliases.add(friendly)
+
+        if executable:
+            exe_alias = self._normalize_process_name(executable)
+            if exe_alias:
+                aliases.add(exe_alias)
+
+        lower = str(app_name or "").lower()
+        known = {
+            "google chrome": {"chrome"},
+            "chrome": {"chrome"},
+            "microsoft edge": {"msedge"},
+            "edge": {"msedge"},
+            "visual studio code": {"code"},
+            "vs code": {"code"},
+            "vscode": {"code"},
+            "windows terminal": {"windowsterminal", "wt", "openconsole", "conhost"},
+            "terminal": {"windowsterminal", "wt", "openconsole", "powershell", "pwsh"},
+            "powershell": {"powershell", "pwsh"},
+            "command prompt": {"cmd"},
+            "cmd": {"cmd"},
+            "file explorer": {"explorer"},
+            "explorer": {"explorer"},
+            "notepad": {"notepad"},
+            "calculator": {"calculatorapp", "calculator"},
+        }
+        for key, values in known.items():
+            if key in lower:
+                aliases.update(values)
+
+        return sorted(a for a in aliases if a)
+
+    def _visible_window_matches_application(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+    ) -> bool:
+        if not HAS_WIN32:
+            return False
+
+        aliases = set(self._application_process_aliases(app_name, executable))
+        friendly_terms = {
+            token
+            for token in re.split(r"[^a-z0-9]+", str(app_name or "").lower())
+            if len(token) >= 3 and token not in {"google", "microsoft", "windows"}
+        }
+        matched = False
+
+        def _enum(hwnd, _):
+            nonlocal matched
+            if matched or not win32gui.IsWindowVisible(hwnd):
+                return
+            title = str(win32gui.GetWindowText(hwnd) or "").strip().lower()
+            if not title:
+                return
+
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                proc_name = self._normalize_process_name(psutil.Process(pid).name())
+            except Exception:
+                proc_name = ""
+
+            if proc_name and proc_name in aliases:
+                matched = True
+                return
+
+            if friendly_terms and any(term in title for term in friendly_terms):
+                matched = True
+
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception:
+            return False
+        return matched
+
+    def is_application_running(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+    ) -> bool:
+        """
+        Verify an app by its real executable/process aliases and, where available,
+        a visible top-level Windows window.
+
+        Friendly names such as 'Google Chrome' must resolve to chrome.exe rather
+        than comparing the literal friendly string with the process name.
+        """
+        aliases = set(self._application_process_aliases(app_name, executable))
+        if aliases:
+            for p in psutil.process_iter(["name", "exe"]):
+                try:
+                    names = {
+                        self._normalize_process_name(p.info.get("name") or ""),
+                        self._normalize_process_name(p.info.get("exe") or ""),
+                    }
+                    names.discard("")
+                    if aliases.intersection(names):
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+                except Exception:
+                    continue
+
+        return self._visible_window_matches_application(app_name, executable)
+
+    def _wait_for_application(
+        self,
+        app_name: str,
+        executable: Optional[str] = None,
+        timeout: float = 5.0,
+    ) -> bool:
+        deadline = time.time() + max(0.5, float(timeout))
+        while time.time() < deadline:
+            if self.is_application_running(app_name, executable):
+                return True
+            time.sleep(0.20)
+        return self.is_application_running(app_name, executable)
+
     def launch_application(
         self,
         app_name: str,
@@ -506,33 +641,51 @@ class WindowsAgent:
         profile: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Launches an application and strictly verifies the process actually starts.
-        Never reports success if the process or window does not launch.
+        Launch an application and verify the real Windows application state.
+
+        Windows applications frequently hand a request to an already-running
+        process and let the short-lived launcher PID exit. That is normal and
+        must not be reported as an application crash.
         """
         app_path = self.find_application_path(app_name)
         if not app_path:
-            # Fallback to shell start-process
             cmd = ["powershell", "-NoProfile", "-Command", f"Start-Process '{app_name}'"]
             try:
-                # PowerShell Start-Process returns after dispatching the detached app.
-                # Use run() for this short-lived launcher so its child handle is
-                # deterministically reaped instead of leaving a Popen ResourceWarning.
-                subprocess.run(
+                completed = subprocess.run(
                     cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=15,
                     check=False,
                 )
-                time.sleep(1.2)
-                verified = self.is_application_running(app_name)
+                if completed.returncode != 0:
+                    return {
+                        "success": False,
+                        "application": app_name,
+                        "executable": app_name,
+                        "method": "powershell_start",
+                        "verified": False,
+                        "error": f"Windows Start-Process returned exit code {completed.returncode}.",
+                    }
+
+                verified = self._wait_for_application(app_name, app_name, timeout=5.0)
                 return {
                     "success": verified,
                     "application": app_name,
                     "executable": app_name,
                     "method": "powershell_start",
                     "verified": verified,
-                    "message": f"Dispatched launch for '{app_name}'. Verified active: {verified}." if verified else f"Failed to verify '{app_name}' running after launch."
+                    "message": (
+                        f"Successfully launched and verified {app_name}."
+                        if verified else
+                        f"Windows accepted the launch request for '{app_name}', but MAYA could not verify a matching process or visible window."
+                    ),
+                    **({} if verified else {
+                        "error": (
+                            f"Windows accepted the launch request for '{app_name}', "
+                            "but no matching process/window became verifiable."
+                        )
+                    }),
                 }
             except Exception as e:
                 return {
@@ -573,45 +726,57 @@ class WindowsAgent:
             cmd.extend(arguments)
 
         try:
-            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            creationflags = (
+                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                if sys.platform == "win32"
+                else 0
+            )
             proc = subprocess.Popen(
                 cmd,
                 cwd=cwd,
                 creationflags=creationflags,
                 close_fds=True
             )
-            time.sleep(1.2)
-            
-            # Action Verification: check poll and process table
-            is_alive = proc.poll() is None
-            if not is_alive:
-                # Some launchers (like code.cmd) exit immediately after spawning Code.exe
-                is_alive = self.is_application_running(app_name)
 
-            if not is_alive:
+            verified = self._wait_for_application(app_name, app_path, timeout=5.0)
+            launcher_alive = proc.poll() is None
+
+            if not verified:
                 return {
                     "success": False,
                     "application": app_name,
                     "executable": app_path,
-                    "pid": None,
+                    "pid": proc.pid if launcher_alive else None,
+                    "launcher_pid": proc.pid,
+                    "launcher_alive": launcher_alive,
                     "verified": False,
-                    "error": f"Application binary executed but process did not remain active."
+                    "error": (
+                        "Application launch was dispatched, but MAYA could not verify "
+                        "a matching running process or visible application window."
+                    )
                 }
 
             result = {
                 "success": True,
                 "application": app_name,
                 "executable": app_path,
-                "pid": proc.pid,
+                "pid": proc.pid if launcher_alive else None,
+                "launcher_pid": proc.pid,
+                "launcher_alive": launcher_alive,
                 "verified": True,
+                "verification": "process_or_visible_window",
                 "message": f"Successfully launched and verified {app_name}."
             }
+
+            if not launcher_alive:
+                result["handoff_detected"] = True
+
             if resolved_profile:
                 result["profile_directory"] = resolved_profile.get("profile_directory")
                 result["profile_name"] = resolved_profile.get("profile_name")
                 result["profile_resolution"] = resolved_profile.get("resolution")
                 result["message"] = (
-                    f"Successfully launched Google Chrome with profile "
+                    f"Successfully launched and verified Google Chrome with profile "
                     f"'{resolved_profile.get('profile_name')}'."
                 )
             return result
@@ -623,18 +788,6 @@ class WindowsAgent:
                 "verified": False,
                 "error": str(e)
             }
-
-    def is_application_running(self, app_name: str) -> bool:
-        """Verifies if application or related process name is active in the OS."""
-        name_lower = app_name.lower().replace(" ", "")
-        for p in psutil.process_iter(['name']):
-            try:
-                proc_name = p.info['name'].lower().replace(" ", "")
-                if name_lower in proc_name or ("code" in name_lower and "code" in proc_name):
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-        return False
 
     def list_processes(self, limit: int = 15, sort_by: str = "memory") -> List[Dict[str, Any]]:
         """List running processes with real CPU and memory usage"""
