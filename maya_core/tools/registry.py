@@ -258,6 +258,12 @@ class ToolRegistry:
                 profile=profile,
                 attachment_path=attachment_path
             ),
+            "read_and_reply_communication": lambda service="whatsapp", recipient="", message="", profile="main", **kw: communication.read_and_reply(
+                service=service,
+                recipient=recipient,
+                message=message,
+                profile=profile
+            ),
             "start_timer": lambda duration_seconds, label="Timer", **kw: windows.start_timer(duration_seconds, label=label),
             "set_reminder": lambda message, time_expression="now", **kw: windows.set_reminder(message, time_expression=time_expression),
             "store_memory": lambda category, key, value, **kw: {"success": True, "saved": memory.save_semantic_memory(category, key, value), "verified": True},
@@ -631,6 +637,20 @@ def build_default_tool_registry() -> ToolRegistry:
             ToolParameter("subject", "string", "Optional Gmail subject", required=False),
             ToolParameter("profile", "string", "Chrome profile hint; defaults to main", required=False, default="main"),
             ToolParameter("attachment_path", "string", "Optional local attachment path", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_3_MODIFICATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="read_and_reply_communication",
+        description="Reads the latest visible WhatsApp message from a specified chat and then sends the user's explicit reply. The external send requires exact confirmation.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("recipient", "string", "Exact synced contact or group name", required=True),
+            ToolParameter("message", "string", "Exact reply text requested by the user", required=True),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
         ],
         permission_level=PermissionLevel.LEVEL_3_MODIFICATION,
         undo_available=False
