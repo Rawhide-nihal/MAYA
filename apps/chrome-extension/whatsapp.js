@@ -306,6 +306,99 @@
     };
   }
 
+  function currentChatRecord(nameHint = '') {
+    const main = document.querySelector('#main');
+    if (!main) return null;
+
+    const jidCandidates = new Set();
+    for (const node of Array.from(main.querySelectorAll('[data-id], [data-jid], [data-chat-id]')).slice(-120)) {
+      for (const attr of ['data-id', 'data-jid', 'data-chat-id']) {
+        const jid = extractJid(node.getAttribute(attr));
+        if (jid) jidCandidates.add(jid);
+      }
+    }
+
+    const jids = Array.from(jidCandidates);
+    const groupJid = jids.find(jid => /@g\.us$/i.test(jid)) || null;
+    const directJids = jids.filter(jid => /@(?:c\.us|s\.whatsapp\.net)$/i.test(jid));
+    const jid = groupJid || (directJids.length === 1 ? directJids[0] : null);
+
+    const header = main.querySelector('header');
+    const headerTitles = Array.from(header?.querySelectorAll?.('[title]') || [])
+      .map(el => cleanContactName(el.getAttribute('title')))
+      .filter(Boolean);
+    const name = headerTitles[0] || cleanContactName(nameHint);
+    if (!name) return null;
+
+    const record = {
+      name,
+      display_name: name,
+      jid: jid || null,
+      chat_id: jid || null,
+      phone: phoneFromJid(jid),
+      type: groupJid ? 'group' : (jid ? 'contact' : 'unknown')
+    };
+    return record;
+  }
+
+  function findChatHeaderClickable() {
+    const header = document.querySelector('#main header');
+    if (!header) return null;
+    return Array.from(header.querySelectorAll('[role="button"], button, [tabindex="0"]'))
+      .filter(M.visible)[0] || header;
+  }
+
+  function visiblePhoneFromDocument() {
+    const root = document.querySelector('[role="dialog"]') || document.body;
+    const texts = Array.from(root.querySelectorAll('span, div'))
+      .filter(M.visible)
+      .map(el => String(el.textContent || '').trim())
+      .filter(text => text.length >= 7 && text.length <= 40);
+
+    for (const text of texts) {
+      const match = text.match(/(?:\+\s*)?\d(?:[\s()-]*\d){6,14}/);
+      if (match) {
+        const digits = match[0].replace(/\D+/g, '');
+        if (digits.length >= 7 && digits.length <= 15) return digits;
+      }
+    }
+    return null;
+  }
+
+  async function inspectCurrentContact(nameHint = '') {
+    let record = currentChatRecord(nameHint) || {
+      name: cleanContactName(nameHint) || String(nameHint || '').trim(),
+      display_name: cleanContactName(nameHint) || String(nameHint || '').trim(),
+      jid: null,
+      chat_id: null,
+      phone: null,
+      type: 'unknown'
+    };
+
+    const header = findChatHeaderClickable();
+    if (header) {
+      header.click();
+      await M.sleep(700);
+      const visiblePhone = visiblePhoneFromDocument();
+      if (!record.phone && visiblePhone) record.phone = visiblePhone;
+
+      const infoText = M.normalize(document.body.innerText || '');
+      if (record.type === 'unknown' && (infoText.includes('group info') || infoText.includes('participants'))) {
+        record.type = 'group';
+      }
+
+      const close = M.findByAriaContains('close', '[aria-label]') ||
+        M.findByAriaContains('back', '[aria-label]');
+      if (close) close.click();
+      else {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      }
+    }
+
+    reportContacts([record], 'whatsapp_live_contact_inspection');
+    return record;
+  }
+
   function findComposer() {
     return Array.from(document.querySelectorAll('[contenteditable="true"]'))
       .filter(M.visible)
@@ -446,6 +539,22 @@
     }
 
     const recipient = String(command.recipient || '').trim();
+
+    if (command.action === 'inspect_contact') {
+      const selected = await selectContact(recipient);
+      if (!selected.ok) {
+        return { success: false, verified: false, error: selected.error };
+      }
+      await M.sleep(500);
+      const record = await inspectCurrentContact(recipient);
+      return {
+        success: Boolean(record?.name),
+        verified: Boolean(record?.name),
+        service: 'whatsapp',
+        recipient,
+        record
+      };
+    }
 
     if (command.action === 'read_messages') {
       const useCurrent = ['current chat', 'current conversation'].includes(M.normalize(recipient));
