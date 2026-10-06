@@ -223,7 +223,9 @@ class ToolRegistry:
             "search_web": lambda query, **kw: browser.search_web(query),
             "lookup_communication_contact": lambda service="whatsapp", query="", detail=None, record_type=None, **kw: communication.lookup_contact(
                 service=service,
-                query=query
+                query=query,
+                detail=detail,
+                record_type=record_type
             ),
             "read_communication_messages": lambda service="whatsapp", recipient="", limit=1, profile="main", **kw: communication.read_messages(
                 recipient=recipient,
