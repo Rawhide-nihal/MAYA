@@ -487,6 +487,45 @@
     return { ok: true };
   }
 
+  function findMessageScrollContainer() {
+    const main = document.querySelector('#main');
+    if (!main) return null;
+
+    const candidates = Array.from(main.querySelectorAll('div'))
+      .filter(M.visible)
+      .filter(el => el.scrollHeight > el.clientHeight + 120)
+      .filter(el => el.querySelector(
+        '[data-testid="msg-container"], .message-in, .message-out'
+      ));
+
+    candidates.sort((a, b) => {
+      const aMessages = a.querySelectorAll(
+        '[data-testid="msg-container"], .message-in, .message-out'
+      ).length;
+      const bMessages = b.querySelectorAll(
+        '[data-testid="msg-container"], .message-in, .message-out'
+      ).length;
+      return bMessages - aMessages;
+    });
+    return candidates[0] || null;
+  }
+
+  async function scrollChatToLatest() {
+    const container = findMessageScrollContainer();
+    if (!container) return false;
+
+    for (let i = 0; i < 3; i += 1) {
+      const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+      container.scrollTop = maxScroll;
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await M.sleep(220);
+
+      const refreshedMax = Math.max(0, container.scrollHeight - container.clientHeight);
+      if (container.scrollTop >= refreshedMax - 8) return true;
+    }
+    return false;
+  }
+
   function extractVisibleMessages(limit = 1, incomingOnly = false) {
     const main = document.querySelector('#main');
     if (!main) return [];
@@ -592,6 +631,8 @@
         };
       }
 
+      await scrollChatToLatest();
+      await M.sleep(220);
       const messages = extractVisibleMessages(
         command.limit || 1,
         Boolean(command.incoming_only)
