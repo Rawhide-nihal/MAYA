@@ -56,6 +56,7 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "get_recent_actions": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_memory": PermissionLevel.LEVEL_1_OBSERVATION,
     "lookup_communication_contact": PermissionLevel.LEVEL_1_OBSERVATION,
+    "read_communication_messages": PermissionLevel.LEVEL_1_OBSERVATION,
     "capture_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "analyze_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_file_content": PermissionLevel.LEVEL_1_OBSERVATION,
@@ -90,6 +91,7 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "rollback_last_action": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "create_directory": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "run_safe_command": PermissionLevel.LEVEL_2_SAFE_ACTION,
+    "open_communication_service": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "sync_communication_contacts": PermissionLevel.LEVEL_2_SAFE_ACTION,
     "prepare_communication": PermissionLevel.LEVEL_2_SAFE_ACTION,
 
