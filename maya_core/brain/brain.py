@@ -70,24 +70,14 @@ class MayaBrain:
         return None
 
     def _resolve_argument_references(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve file/screenshot pronouns in tool arguments against session context."""
-        if self.unified_context is None or not isinstance(arguments, dict):
+        """Resolve communication and file/session references in tool arguments."""
+        if not isinstance(arguments, dict):
             return arguments
-
-        reference_values = {
-            "this", "that", "it", "this file", "that file", "the file",
-            "latest file", "this document", "that document", "the document",
-            "latest attachment", "this attachment", "that attachment",
-            "this screenshot", "that screenshot", "the screenshot",
-            "latest screenshot", "previous screenshot", "before"
-        }
-        path_keys = {
-            "filepath", "path", "source", "attachment_path",
-            "project_path", "directory", "target"
-        }
 
         resolved = dict(arguments)
 
+        # Communication pronouns are session-level brain state and must work
+        # even when the richer UnifiedContextEngine is unavailable.
         recipient = resolved.get("recipient")
         if isinstance(recipient, str):
             recipient_ref = recipient.strip().lower()
@@ -96,6 +86,22 @@ class MayaBrain:
                 "that person", "this person", "that guy", "this guy"
             } and self._last_communication_recipient:
                 resolved["recipient"] = self._last_communication_recipient
+
+        if self.unified_context is None:
+            return resolved
+
+        reference_values = {
+            "this", "that", "it", "this file", "that file", "the file",
+            "latest file", "this document", "that document", "the document",
+            "latest attachment", "this attachment", "that attachment",
+            "this screenshot", "that screenshot", "the screenshot",
+            "latest screenshot", "previous screenshot", "before",
+            "this folder", "that folder", "the folder", "latest folder"
+        }
+        path_keys = {
+            "filepath", "path", "source", "attachment_path",
+            "project_path", "directory", "target"
+        }
 
         for key, value in list(resolved.items()):
             if key not in path_keys or not isinstance(value, str):
