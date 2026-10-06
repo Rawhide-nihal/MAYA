@@ -260,9 +260,13 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r27["arguments"]["recipient"], "Niteesh")
         self.assertEqual(r27["arguments"]["limit"], 1)
 
+        self.assertTrue(r27["arguments"]["incoming_only"])
+
         r28 = self.classifier.classify_and_extract("Read last 3 WhatsApp messages from Project Team")
         self.assertEqual(r28["tool"], "read_communication_messages")
         self.assertEqual(r28["arguments"]["limit"], 3)
+
+        self.assertTrue(r28["arguments"]["incoming_only"])
 
         r29 = self.classifier.classify_and_extract(
             "Read the latest message from Niteesh and reply saying I'll call in 10 minutes"
