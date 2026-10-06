@@ -651,6 +651,20 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertTrue(result.get("handoff_detected"))
         self.assertFalse(result["launcher_alive"])
 
+        class FakeChromeProcess:
+            info = {
+                "name": "chrome.exe",
+                "exe": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            }
+
+        with patch("agents.windows.agent.psutil.process_iter", return_value=[FakeChromeProcess()]):
+            self.assertTrue(
+                agent.is_application_running(
+                    "Google Chrome",
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+                )
+            )
+
     def test_direct_personality_social_replies(self):
         personality = PersonalityEngine()
 
