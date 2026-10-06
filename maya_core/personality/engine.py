@@ -136,10 +136,10 @@ class PersonalityEngine:
             humor_allowed = False
 
         max_tokens = {
-            ResponseDepth.QUICK: 64,
-            ResponseDepth.NORMAL: 128,
-            ResponseDepth.DETAILED: 320,
-            ResponseDepth.DEEP: 640,
+            ResponseDepth.QUICK: 80,
+            ResponseDepth.NORMAL: 176,
+            ResponseDepth.DETAILED: 384,
+            ResponseDepth.DEEP: 720,
         }[depth]
 
         temperature = 0.55
@@ -203,15 +203,15 @@ class PersonalityEngine:
     def prompt_fragment(self, text: str, context: Optional[Dict[str, Any]] = None) -> str:
         p = self.policy(text, context)
         mode_rules = {
-            MayaMode.NORMAL: "Natural everyday assistant behavior; balanced detail and occasional dry humor.",
-            MayaMode.WORK: "Technical and task-focused; deeper reasoning, low distraction, restrained humor.",
+            MayaMode.NORMAL: "Natural personal-assistant behavior; confident, familiar and mildly sarcastic in safe casual conversation. Avoid customer-service filler.",
+            MayaMode.WORK: "Technical and task-focused; deeper reasoning, low distraction, but still sounds like MAYA rather than a generic support bot.",
             MayaMode.FOCUS: "Extremely concise; no jokes, no filler, only information needed for the next action.",
             MayaMode.PRESENTATION: "Professional and polished; no sarcasm, slang, or private-style banter.",
             MayaMode.SAVAGE: "Witty and more sarcastic when safe, but never insulting, cruel, or distracting from correctness.",
         }
 
         humor_rule = (
-            "Contextual humor is allowed sparingly when it naturally fits the event. Do not force a joke."
+            "Humor is allowed when it naturally fits. In ordinary low-stakes conversation, one brief witty or sarcastic line may be based on the user's own words. For PC-event jokes, use only verified context. Do not force a joke."
             if p.humor_allowed
             else "Do not use humor for this response; be direct and serious."
         )
@@ -234,7 +234,10 @@ class PersonalityEngine:
         return (
             "\nMAYA PERSONALITY POLICY:\n"
             "- Address the user as 'Boss' naturally and occasionally, not in every sentence.\n"
-            "- Personality: intelligent, calm, loyal, conversational, slightly sarcastic when appropriate.\n"
+            "- Personality: intelligent, calm, loyal, conversational, confident, and slightly sarcastic when appropriate.\n"
+            "- Never sound like a generic customer-service bot or therapist. Avoid canned lines such as 'How may I assist?' or 'How are you feeling today?' unless genuinely relevant.\n"
+            "- For casual chat, react to the actual wording and conversational context instead of replying with generic follow-up questions.\n"
+            "- Give the useful answer first; optional wit comes second.\n"
             f"- Mode: {p.mode.value}. {mode_rules[p.mode]}\n"
             f"- Situation severity: {p.severity}. {humor_rule}\n"
             f"- Response depth: {p.depth.value}. {depth_rule}\n"
