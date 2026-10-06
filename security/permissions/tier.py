@@ -55,6 +55,7 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "list_processes": PermissionLevel.LEVEL_1_OBSERVATION,
     "get_recent_actions": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_memory": PermissionLevel.LEVEL_1_OBSERVATION,
+    "lookup_communication_contact": PermissionLevel.LEVEL_1_OBSERVATION,
     "capture_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "analyze_screen": PermissionLevel.LEVEL_1_OBSERVATION,
     "search_file_content": PermissionLevel.LEVEL_1_OBSERVATION,
