@@ -527,7 +527,7 @@
     );
   }
 
-  async function selectContact(recipient) {
+  async function selectContact(recipient, desiredType = null) {
     const search = await M.waitFor(findSearchBox, 12000);
     if (!search) return { ok: false, error: 'WhatsApp search field was not found.' };
 
@@ -550,10 +550,17 @@
 
       const record = contactRecordFromElement(el);
       if (!record?.name) continue;
+      const wanted = String(desiredType || '').toLowerCase();
+      const actual = String(record.type || 'unknown').toLowerCase();
+      if (wanted && actual !== 'unknown' && actual !== wanted) continue;
+
+      let score = contactSimilarity(recipient, record.name);
+      if (wanted && actual === wanted) score = Math.min(1, score + 0.025);
+
       candidates.push({
         row,
         record,
-        score: contactSimilarity(recipient, record.name)
+        score
       });
     }
 
@@ -717,7 +724,7 @@
     const recipient = String(command.recipient || '').trim();
 
     if (command.action === 'inspect_contact') {
-      const selected = await selectContact(recipient);
+      const selected = await selectContact(recipient, command.record_type || null);
       if (!selected.ok) {
         return {
           success: false,
