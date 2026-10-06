@@ -157,6 +157,8 @@ class DynamicTaskPlanner:
                 launch_arguments["profile"] = args.get("profile")
             if args.get("path"):
                 launch_arguments["path"] = args.get("path")
+            if args.get("force_new"):
+                launch_arguments["force_new"] = True
             steps.append(DynamicPlanStep(
                 step_id=1,
                 name=f"Launch {app}",
@@ -585,7 +587,8 @@ class DynamicTaskPlanner:
             result = self.windows.launch_application(
                 app,
                 arguments=launch_args,
-                profile=arguments.get("profile")
+                profile=arguments.get("profile"),
+                force_new=bool(arguments.get("force_new", False)),
             )
             affected_resources.append(app)
             summary = f"Opened {app}"
