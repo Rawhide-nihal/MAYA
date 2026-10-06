@@ -574,6 +574,24 @@ class CommunicationBridge:
                         len(query_tokens & term_tokens) / max(1, len(query_tokens | term_tokens))
                         if query_tokens or term_tokens else 0.0
                     )
+                    token_fuzzy_parts = []
+                    for query_token in query_tokens:
+                        best_token_score = 0.0
+                        for term_token in term_tokens:
+                            token_seq = SequenceMatcher(None, query_token, term_token).ratio()
+                            token_distance = self._levenshtein_distance(query_token, term_token)
+                            token_edit = 1.0 - (
+                                token_distance / max(1, len(query_token), len(term_token))
+                            )
+                            best_token_score = max(
+                                best_token_score,
+                                (0.55 * token_seq) + (0.45 * token_edit),
+                            )
+                        token_fuzzy_parts.append(best_token_score)
+                    token_fuzzy = (
+                        sum(token_fuzzy_parts) / len(token_fuzzy_parts)
+                        if token_fuzzy_parts else 0.0
+                    )
                     prefix = 1.0 if (
                         len(normalized) >= 2 and (
                             term.startswith(normalized) or normalized.startswith(term)
@@ -594,7 +612,8 @@ class CommunicationBridge:
                         0.97 * prefix,
                         0.95 * substring,
                         0.94 * token_overlap,
-                        (0.40 * seq) + (0.35 * edit) + (0.15 * gram) + (0.10 * token_overlap),
+                        0.93 * token_fuzzy,
+                        (0.36 * seq) + (0.30 * edit) + (0.14 * gram) + (0.10 * token_overlap) + (0.10 * token_fuzzy),
                     )
                     strategy = "hybrid_fuzzy"
 
@@ -648,7 +667,7 @@ class CommunicationBridge:
         confident = (
             top_score >= 0.985
             or (top_score >= 0.90 and margin >= 0.035)
-            or (top_score >= 0.84 and margin >= 0.10)
+            or (top_score >= 0.82 and margin >= 0.10)
         )
 
         if confident:
