@@ -676,6 +676,26 @@ class MayaBrain:
             yield {"type": "error", "error": "Request is not eligible for conversational streaming"}
             return
 
+        direct_social = self.personality.direct_social_reply(cleaned_query)
+        if direct_social:
+            self.memory.add_message("user", cleaned_query)
+            self.memory.add_message("maya", direct_social)
+            yield {"type": "token", "delta": direct_social}
+            yield {
+                "type": "done",
+                "result": {
+                    "intent": "CHAT",
+                    "reply": direct_social,
+                    "executed_tool": None,
+                    "tasks": [],
+                    "fallback_used": False,
+                    "fast_path": True,
+                    "personality_direct": True,
+                    "timestamp": time.time(),
+                },
+            }
+            return
+
         self.memory.add_message("user", cleaned_query)
         self.planner.emit("maya.state.changed", {"state": "THINKING"})
         ctx = self.context_builder.build_chat_context(cleaned_query)
@@ -814,6 +834,20 @@ class MayaBrain:
 
         # 1. Store user message in episodic memory
         self.memory.add_message("user", cleaned_query)
+
+        direct_social = self.personality.direct_social_reply(cleaned_query)
+        if direct_social:
+            self.memory.add_message("maya", direct_social)
+            return {
+                "intent": "CHAT",
+                "reply": direct_social,
+                "executed_tool": None,
+                "tasks": [],
+                "fallback_used": False,
+                "fast_path": True,
+                "personality_direct": True,
+                "timestamp": time.time(),
+            }
 
         # Fast conversation path: do not scan the project/system for ordinary chat.
         intent_info = self.fallback_classifier.classify_and_extract(cleaned_query)
