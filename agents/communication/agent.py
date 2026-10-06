@@ -301,6 +301,7 @@ class CommunicationAgent:
                     "error": launch.get("error", "Could not open communication service."),
                     "launch": launch,
                 }
+            target_tab_id = launch.get("tab_id")
 
         command = {
             "service": service_name,
@@ -334,6 +335,8 @@ class CommunicationAgent:
         self,
         service: str = "whatsapp",
         query: str = "",
+        detail: Optional[str] = None,
+        record_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         service_name = self._normalize_service(service)
         if service_name not in {"whatsapp", "telegram"}:
@@ -351,7 +354,11 @@ class CommunicationAgent:
                 "error": "Contact name is required.",
             }
 
-        resolution = self.bridge.resolve_contact(service_name, query_text)
+        resolution = self.bridge.resolve_contact(
+            service_name,
+            query_text,
+            record_type=record_type,
+        )
         indexed_count = len(self.bridge.list_contacts(service_name))
 
         if resolution.get("matched"):
@@ -371,6 +378,7 @@ class CommunicationAgent:
                 "aliases": record.get("aliases") or [],
                 "resolution": resolution.get("resolution"),
                 "score": resolution.get("score"),
+                "detail_requested": detail,
                 "indexed_count": indexed_count,
             }
 
@@ -419,7 +427,7 @@ class CommunicationAgent:
             "subject": "",
             "profile": profile or "main",
             "attachment_path": None,
-            "target_tab_id": None,
+            "target_tab_id": launch.get("tab_id"),
         }, timeout=45.0)
         result.setdefault("service", service_name)
         result["chrome_profile"] = launch.get("profile_name") or launch.get("profile_directory")
