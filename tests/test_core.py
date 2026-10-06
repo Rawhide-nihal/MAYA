@@ -276,6 +276,25 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r30["arguments"]["recipient"], "Niteesh")
         self.assertTrue(r30["arguments"]["attachment_path"].endswith(r"Projects\Demo"))
 
+        r31 = self.classifier.classify_and_extract(
+            "Text him saying I'll call later"
+        )
+        self.assertEqual(r31["tool"], "send_communication")
+        self.assertEqual(r31["arguments"]["recipient"].lower(), "him")
+
+        self.brain._last_communication_recipient = "Niteesh"
+        resolved_pronoun = self.brain._resolve_argument_references(
+            r31["arguments"]
+        )
+        self.assertEqual(resolved_pronoun["recipient"], "Niteesh")
+
+        clarification = self.brain.process_request(
+            "Can u text him from my side"
+        )
+        self.assertEqual(clarification["intent"], "CLARIFICATION")
+        self.assertIn("Niteesh", clarification["reply"])
+        self.assertIn("what do you want me to send", clarification["reply"].lower())
+
         self.assertFalse(
             self.brain.is_fast_conversation("Maya, sync my WhatsApp contacts.")
         )
