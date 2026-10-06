@@ -1131,6 +1131,27 @@ class MayaBrain:
                 reply += " The scan reached the available end of the WhatsApp Web contact picker."
             return reply
 
+        if tool_name == "inspect_communication_contact":
+            query = str(last_res.get("query") or (decision.arguments or {}).get("query") or "that contact")
+            if last_res.get("success") and last_res.get("found"):
+                name = last_res.get("name") or query
+                phone = last_res.get("phone") or (last_res.get("record") or {}).get("phone")
+                jid = last_res.get("jid") or (last_res.get("record") or {}).get("jid")
+                record_type = last_res.get("type") or (last_res.get("record") or {}).get("type")
+                if phone:
+                    return f"{name}'s WhatsApp number is {phone}, Boss. I also refreshed that record in the local backend."
+                if record_type == "group":
+                    suffix = f" Its WhatsApp group ID is {jid}." if jid else ""
+                    return f"I found and refreshed the WhatsApp group {name}, Boss.{suffix}"
+                suffix = f" I stored the WhatsApp chat ID {jid}." if jid else ""
+                return (
+                    f"I found {name} and refreshed the backend record, Boss, but WhatsApp Web did not expose a phone number."
+                    + suffix
+                )
+            if last_res.get("ambiguous"):
+                return f"I found multiple WhatsApp matches for {query}, Boss, so I refused to guess."
+            return f"I couldn't inspect WhatsApp details for {query}: {last_res.get('error', 'details were not exposed')}"
+
         if tool_name == "lookup_communication_contact":
             args = decision.arguments or {}
             query = str(last_res.get("query") or args.get("query") or "that contact")
