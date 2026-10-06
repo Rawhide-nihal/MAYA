@@ -619,6 +619,51 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertTrue(ambiguous["ambiguous"])
         self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
 
+    def test_windows_application_aliases_and_launcher_handoff(self):
+        from unittest.mock import patch, MagicMock
+
+        agent = WindowsAgent()
+
+        self.assertIn("chrome", agent._application_process_aliases(
+            "Google Chrome",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        ))
+        self.assertIn("msedge", agent._application_process_aliases(
+            "Microsoft Edge",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        ))
+        self.assertIn("code", agent._application_process_aliases(
+            "Visual Studio Code",
+            r"C:\Users\Boss\AppData\Local\Programs\Microsoft VS Code\Code.exe"
+        ))
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 4242
+        fake_proc.poll.return_value = 0  # launcher exited after handing off
+
+        with patch.object(agent, "find_application_path", return_value=r"C:\Apps\chrome.exe"), \
+             patch.object(agent, "_wait_for_application", return_value=True), \
+             patch("agents.windows.agent.subprocess.Popen", return_value=fake_proc):
+            result = agent.launch_application("Google Chrome")
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["verified"])
+        self.assertTrue(result.get("handoff_detected"))
+        self.assertFalse(result["launcher_alive"])
+
+    def test_direct_personality_social_replies(self):
+        personality = PersonalityEngine()
+
+        how = personality.direct_social_reply("Hey Maya how you doing")
+        self.assertIsNotNone(how)
+        self.assertIn("Boss", how)
+        self.assertIn("existential crisis", how)
+
+        identity = personality.direct_social_reply("Ur Maya")
+        self.assertIsNotNone(identity)
+        self.assertIn("Boss", identity)
+        self.assertIn("another AI", identity)
+
     def test_recent_screenshot_and_image_file_resolution(self):
         original = os.environ.get("MAYA_SCREENSHOT_DIR")
         screenshots = Path(self.temp_dir.name) / "Pictures" / "Screenshots"
