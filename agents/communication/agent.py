@@ -417,16 +417,6 @@ class CommunicationAgent:
             query_text,
             record_type=record_type,
         )
-        if local.get("ambiguous"):
-            return {
-                "success": False,
-                "verified": False,
-                "ambiguous": True,
-                "query": query_text,
-                "suggestions": local.get("suggestions") or [],
-                "error": f"Multiple WhatsApp records could match '{query_text}'.",
-            }
-
         recipient = (
             str((local.get("record") or {}).get("name") or local.get("name") or query_text)
             if local.get("matched")
@@ -539,6 +529,43 @@ class CommunicationAgent:
                 "score": resolution.get("score"),
                 "detail_requested": detail,
                 "indexed_count": indexed_count,
+            }
+
+        if service_name == "whatsapp":
+            live = self.inspect_contact(
+                service="whatsapp",
+                query=query_text,
+                profile="main",
+                record_type=record_type,
+            )
+            if live.get("success") and live.get("found"):
+                live["resolution"] = live.get("resolution") or "live_whatsapp_fuzzy"
+                live["local_search_before_live"] = resolution
+                live["indexed_count"] = len(self.bridge.list_contacts(service_name))
+                live["detail_requested"] = detail
+                return live
+
+            live_suggestions = (
+                (live.get("live_result") or {}).get("suggestions")
+                or live.get("suggestions")
+                or []
+            )
+            return {
+                "success": True,
+                "verified": True,
+                "found": False,
+                "ambiguous": bool(
+                    resolution.get("ambiguous")
+                    or (live.get("live_result") or {}).get("ambiguous")
+                    or live.get("ambiguous")
+                ),
+                "service": service_name,
+                "query": query_text,
+                "suggestions": live_suggestions or resolution.get("suggestions") or [],
+                "indexed_count": indexed_count,
+                "local_search": resolution,
+                "live_search_attempted": True,
+                "live_error": live.get("error"),
             }
 
         return {
