@@ -173,6 +173,54 @@ class CommunicationAgent:
         result["chrome_profile"] = launch.get("profile_name") or launch.get("profile_directory")
         return result
 
+    def lookup_contact(
+        self,
+        service: str = "whatsapp",
+        query: str = "",
+    ) -> Dict[str, Any]:
+        service_name = self._normalize_service(service)
+        if service_name not in {"whatsapp", "telegram"}:
+            return {
+                "success": False,
+                "verified": False,
+                "error": "Contact lookup supports WhatsApp or Telegram indexes.",
+            }
+
+        query_text = str(query or "").strip()
+        if not query_text:
+            return {
+                "success": False,
+                "verified": False,
+                "error": "Contact name is required.",
+            }
+
+        resolution = self.bridge.resolve_contact(service_name, query_text)
+        indexed_count = len(self.bridge.list_contacts(service_name))
+
+        if resolution.get("matched"):
+            return {
+                "success": True,
+                "verified": True,
+                "found": True,
+                "service": service_name,
+                "query": query_text,
+                "name": resolution.get("name"),
+                "resolution": resolution.get("resolution"),
+                "score": resolution.get("score"),
+                "indexed_count": indexed_count,
+            }
+
+        return {
+            "success": True,
+            "verified": True,
+            "found": False,
+            "ambiguous": bool(resolution.get("ambiguous")),
+            "service": service_name,
+            "query": query_text,
+            "suggestions": resolution.get("suggestions") or [],
+            "indexed_count": indexed_count,
+        }
+
     def sync_contacts(
         self,
         service: str = "whatsapp",
