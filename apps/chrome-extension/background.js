@@ -1,6 +1,7 @@
 const MAYA_API = 'http://127.0.0.1:5000/api';
 let sessionToken = null;
 const inFlight = new Set();
+let browserActionBusy = false;
 
 async function getToken() {
   if (sessionToken) return sessionToken;
@@ -75,6 +76,8 @@ async function reportActiveTabContext() {
 }
 
 async function pollBrowserAction() {
+  if (browserActionBusy) return;
+  browserActionBusy = true;
   try {
     const token = await getToken();
     const response = await fetch(`${MAYA_API}/browser/action/next`, {
@@ -165,10 +168,13 @@ async function pollBrowserAction() {
     reportActiveTabContext();
   } catch {
     // MAYA may be offline.
+  } finally {
+    browserActionBusy = false;
   }
 }
 
-setInterval(pollBrowserAction, 500);
+// MV3 service workers may sleep, so this timer is only a best-effort path.
+setInterval(pollBrowserAction, 1000);
 
 setInterval(reportActiveTabContext, 1500);
 reportActiveTabContext();
@@ -266,6 +272,10 @@ async function postResult(commandId, result) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'maya-poll' && sender.tab?.id) {
+    // A content-script poll wakes an MV3 background worker. Process pending
+    // privileged browser actions here too, instead of depending on setInterval
+    // continuing to run while Chrome has suspended the service worker.
+    pollBrowserAction();
     pollForCommand(message.service, sender.tab.id);
     return;
   }
