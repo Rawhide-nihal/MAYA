@@ -211,6 +211,31 @@ class TestSecurityIntegration(unittest.TestCase):
         self.assertFalse(attachment_replay.granted)
         self.assertTrue(attachment_replay.requires_confirmation)
 
+        read_reply_args = {
+            "service": "whatsapp",
+            "recipient": "Niteesh",
+            "message": "I'll call in 10 minutes",
+            "profile": "main"
+        }
+        read_reply_decision = test_pm.check_permission(
+            "read_and_reply_communication",
+            read_reply_args
+        )
+        self.assertTrue(read_reply_decision.requires_confirmation)
+        read_reply_token = test_pm.resolve_confirmation(
+            read_reply_decision.confirmation_id,
+            approved=True
+        )
+        tampered_read_reply = dict(read_reply_args)
+        tampered_read_reply["message"] = "Send me your password"
+        tampered_read_reply_decision = test_pm.check_permission(
+            "read_and_reply_communication",
+            tampered_read_reply,
+            token=read_reply_token
+        )
+        self.assertFalse(tampered_read_reply_decision.granted)
+        self.assertTrue(tampered_read_reply_decision.requires_confirmation)
+
     def test_attachment_upload_requires_auth_and_registers_context(self):
         unauth = self.client.post(
             "/api/attachments",
@@ -385,6 +410,80 @@ class TestSecurityIntegration(unittest.TestCase):
         )
         self.assertEqual(listed.status_code, 200)
         self.assertTrue(listed.get_json().get("success"))
+
+    def test_browser_action_queue_requires_auth_and_completes_exact_action(self):
+        unauth_next = self.client.get("/api/browser/action/next")
+        self.assertEqual(unauth_next.status_code, 401)
+
+        unauth_result = self.client.post(
+            "/api/browser/action/result",
+            json={
+                "action_id": "fake",
+                "result": {"success": True, "verified": True}
+            }
+        )
+        self.assertEqual(unauth_result.status_code, 401)
+
+        holder = {}
+
+        def submit_action():
+            holder["result"] = communication_bridge.submit_browser_action({
+                "type": "focus_service",
+                "service": "whatsapp",
+                "url": "https://web.whatsapp.com/",
+                "force_new": False,
+            }, timeout=4.0)
+
+        worker = threading.Thread(target=submit_action, daemon=True)
+        worker.start()
+
+        action = None
+        for _ in range(30):
+            response = self.client.get(
+                "/api/browser/action/next",
+                headers={"X-Maya-Token": AUTH_TOKEN}
+            )
+            self.assertEqual(response.status_code, 200)
+            action = response.get_json().get("action")
+            if action:
+                break
+            time.sleep(0.03)
+
+        self.assertIsNotNone(action)
+        self.assertEqual(action["type"], "focus_service")
+        self.assertEqual(action["service"], "whatsapp")
+        self.assertFalse(action["force_new"])
+
+        wrong_id = self.client.post(
+            "/api/browser/action/result",
+            headers=self.auth_headers,
+            json={
+                "action_id": "not-the-real-action",
+                "result": {"success": True, "verified": True}
+            }
+        )
+        self.assertEqual(wrong_id.status_code, 404)
+
+        completed = self.client.post(
+            "/api/browser/action/result",
+            headers=self.auth_headers,
+            json={
+                "action_id": action["action_id"],
+                "result": {
+                    "success": True,
+                    "verified": True,
+                    "reused_existing": True,
+                    "tab_id": 77
+                }
+            }
+        )
+        self.assertEqual(completed.status_code, 200)
+
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(holder.get("result", {}).get("success"))
+        self.assertTrue(holder["result"].get("reused_existing"))
+        self.assertEqual(holder["result"].get("tab_id"), 77)
 
     def test_browser_context_rejects_unauthorized_update(self):
         bad = self.client.post(
