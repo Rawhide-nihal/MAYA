@@ -141,7 +141,7 @@ class DeterministicIntentClassifier:
 
         paste_current_chat = re.match(
             r"^(?:now\s+)?(?:paste|attach)\s+"
-            r"((?:this|that|the|latest|previous)(?:\s+(?:screenshot|file|document|attachment))?)"
+            r"((?:this|that|the|latest|previous)(?:\s+(?:screenshot|file|folder|document|attachment))?)"
             r"\s+(?:into|to)\s+(whatsapp|telegram)$",
             cleaned,
             flags=re.IGNORECASE
@@ -167,7 +167,7 @@ class DeterministicIntentClassifier:
         # conversation, never as a contact name to guess/search.
         attachment_current_chat = re.match(
             r"^(?:send|share)\s+"
-            r"((?:(?:this|that|the|latest|previous)\s+)?(?:screenshot|file|document|attachment))"
+            r"((?:(?:this|that|the|latest|previous)\s+)?(?:screenshot|file|folder|document|attachment))"
             r"\s+to\s+(?:this\s+(?:guy|person|contact)|him|her|this\s+chat|the\s+current\s+chat|current\s+chat)"
             r"\s+(?:on|in|via)\s+(whatsapp|telegram)"
             r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
@@ -238,7 +238,7 @@ class DeterministicIntentClassifier:
 
         # Context-linked file/screenshot communication.
         attachment_chat = re.match(
-            r"^(?:send|share)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
+            r"^(?:send|share)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|folder|document|attachment))"
             r"\s+to\s+(.+?)\s+(?:on|in|via)\s+(whatsapp|telegram)"
             r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
             cleaned,
@@ -261,7 +261,7 @@ class DeterministicIntentClassifier:
             }
 
         attachment_email = re.match(
-            r"^(?:email|send)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
+            r"^(?:email|send)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|folder|document|attachment))"
             r"\s+to\s+([^\s,]+@[^\s,]+)"
             r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
             cleaned,
