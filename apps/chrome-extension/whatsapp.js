@@ -29,14 +29,104 @@
     return name;
   }
 
-  function collectVisibleContactNames(root = document) {
-    const names = new Set();
+  function extractJid(value) {
+    const text = String(value || '');
+    const match = text.match(/([0-9A-Za-z._:-]+@(?:g\.us|c\.us|s\.whatsapp\.net|lid))/i);
+    return match ? match[1] : null;
+  }
+
+  function phoneFromJid(jid) {
+    const match = String(jid || '').match(/^(\d+)@(?:c\.us|s\.whatsapp\.net)$/i);
+    return match ? match[1] : null;
+  }
+
+  function contactRecordFromElement(element) {
+    if (!element) return null;
+    const name = cleanContactName(element.getAttribute?.('title') || element.textContent);
+    if (!name) return null;
+
+    const row = element.closest?.(
+      '[role="listitem"], [role="button"], div[tabindex="-1"], [data-testid*="cell-frame"]'
+    ) || element.parentElement || element;
+
+    const identityValues = [];
+    const pushAttrs = (node) => {
+      if (!node?.getAttribute) return;
+      for (const attr of ['data-id', 'data-jid', 'data-chat-id', 'data-contact-id', 'href']) {
+        const value = node.getAttribute(attr);
+        if (value) identityValues.push(value);
+      }
+    };
+
+    pushAttrs(row);
+    pushAttrs(element);
+    for (const node of Array.from(row.querySelectorAll?.(
+      '[data-id], [data-jid], [data-chat-id], [data-contact-id], a[href]'
+    ) || []).slice(0, 20)) {
+      pushAttrs(node);
+    }
+
+    let jid = null;
+    for (const value of identityValues) {
+      jid = extractJid(value);
+      if (jid) break;
+    }
+
+    const phone = phoneFromJid(jid);
+    const ariaText = [
+      row.getAttribute?.('aria-label'),
+      row.getAttribute?.('title'),
+      row.textContent
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    const looksGroup = Boolean(
+      (jid && /@g\.us$/i.test(jid)) ||
+      row.querySelector?.('[data-icon*="group"], [aria-label*="group" i]') ||
+      /\bgroup\b/.test(ariaText)
+    );
+
+    return {
+      name,
+      display_name: name,
+      jid: jid || null,
+      chat_id: jid || null,
+      phone: phone || null,
+      type: looksGroup ? 'group' : (jid ? 'contact' : 'unknown')
+    };
+  }
+
+  function recordKey(record) {
+    if (!record) return '';
+    if (record.jid) return `jid:${String(record.jid).toLowerCase()}`;
+    if (record.phone) return `phone:${String(record.phone).replace(/\D+/g, '')}`;
+    return `name:${M.normalize(record.name)}:${record.type || 'unknown'}`;
+  }
+
+  function mergeRecordMap(target, records) {
+    for (const record of records || []) {
+      if (!record?.name) continue;
+      const key = recordKey(record);
+      if (!key) continue;
+      const existing = target.get(key);
+      target.set(key, existing ? {
+        ...existing,
+        ...record,
+        jid: record.jid || existing.jid || null,
+        chat_id: record.chat_id || existing.chat_id || null,
+        phone: record.phone || existing.phone || null,
+        type: record.type !== 'unknown' ? record.type : (existing.type || 'unknown')
+      } : record);
+    }
+  }
+
+  function collectVisibleContactRecords(root = document) {
+    const records = new Map();
     const titled = Array.from(root.querySelectorAll('[title]')).filter(M.visible);
     for (const element of titled) {
-      const name = cleanContactName(element.getAttribute('title'));
-      if (name) names.add(name);
+      const record = contactRecordFromElement(element);
+      if (record) mergeRecordMap(records, [record]);
     }
-    return Array.from(names);
+    return Array.from(records.values());
   }
 
   function reportContacts(contacts, source) {
@@ -52,8 +142,11 @@
   function reportVisibleSidebarContacts() {
     const pane = document.querySelector('#pane-side');
     if (!pane) return;
-    const contacts = collectVisibleContactNames(pane).sort((a, b) => a.localeCompare(b));
-    const signature = contacts.join('\u0000');
+    const contacts = collectVisibleContactRecords(pane)
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    const signature = contacts
+      .map(record => `${recordKey(record)}|${record.name}|${record.type}`)
+      .join('\u0000');
     if (!contacts.length || signature === lastSidebarContactSignature) return;
     lastSidebarContactSignature = signature;
     reportContacts(contacts, 'whatsapp_sidebar');
@@ -100,20 +193,76 @@
     return candidates[0] || null;
   }
 
+  async function scanScrollableRecords(container, collected, source, maxSteps = 80) {
+    if (!container) return false;
+    const originalScrollTop = container.scrollTop;
+    let reachedBottom = false;
+    let stableRounds = 0;
+    let previousSize = collected.size;
+
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await M.sleep(250);
+
+    for (let i = 0; i < maxSteps; i += 1) {
+      mergeRecordMap(collected, collectVisibleContactRecords(container));
+      reportContacts(Array.from(collected.values()), source);
+
+      const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+      if (container.scrollTop >= maxScroll - 8) {
+        reachedBottom = true;
+        break;
+      }
+
+      container.scrollTop = Math.min(
+        maxScroll,
+        container.scrollTop + Math.max(420, container.clientHeight * 0.82)
+      );
+      container.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await M.sleep(260);
+
+      if (collected.size === previousSize) stableRounds += 1;
+      else stableRounds = 0;
+      previousSize = collected.size;
+
+      if (stableRounds >= 10) break;
+    }
+
+    container.scrollTop = originalScrollTop;
+    container.dispatchEvent(new Event('scroll', { bubbles: true }));
+    return reachedBottom;
+  }
+
   async function syncAllContacts() {
+    const collected = new Map();
+
+    // First scan the full chat list. This is where WhatsApp groups are most
+    // reliably exposed, including group JIDs when the DOM provides them.
+    const sidebar = document.querySelector('#pane-side');
+    let chatsComplete = false;
+    if (sidebar) {
+      chatsComplete = await scanScrollableRecords(
+        sidebar,
+        collected,
+        'whatsapp_chat_sidebar',
+        100
+      );
+    }
     reportVisibleSidebarContacts();
 
+    // Then scan the New Chat picker for contacts not currently present in chats.
     const newChat = await M.waitFor(findNewChatButton, 8000);
     if (!newChat) {
-      const visible = collectVisibleContactNames(document.querySelector('#pane-side') || document);
-      reportContacts(visible, 'whatsapp_visible_fallback');
+      reportContacts(Array.from(collected.values()), 'whatsapp_visible_fallback');
       return {
-        success: visible.length > 0,
-        verified: visible.length > 0,
-        contacts_synced: visible.length,
+        success: collected.size > 0,
+        verified: collected.size > 0,
+        contacts_synced: collected.size,
         complete: false,
-        error: visible.length > 0
-          ? 'WhatsApp New chat button was not found; MAYA synced the currently loaded chats only.'
+        partial: true,
+        chat_scan_complete: chatsComplete,
+        error: collected.size > 0
+          ? 'WhatsApp New chat button was not found; MAYA synced the available chats/groups only.'
           : 'WhatsApp contact UI was not available.'
       };
     }
@@ -121,45 +270,17 @@
     newChat.click();
     await M.sleep(800);
 
-    const collected = new Set(collectVisibleContactNames(document));
-    let container = findContactScrollContainer();
-    let reachedBottom = false;
-    let stableRounds = 0;
-    let previousCount = collected.size;
+    mergeRecordMap(collected, collectVisibleContactRecords(document));
+    const pickerContainer = findContactScrollContainer();
+    const contactsComplete = await scanScrollableRecords(
+      pickerContainer,
+      collected,
+      'whatsapp_contact_picker',
+      100
+    );
+    mergeRecordMap(collected, collectVisibleContactRecords(document));
+    reportContacts(Array.from(collected.values()), 'whatsapp_full_sync');
 
-    if (container) {
-      for (let i = 0; i < 60; i += 1) {
-        collectVisibleContactNames(container).forEach(name => collected.add(name));
-        reportContacts(Array.from(collected), 'whatsapp_contact_picker');
-
-        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-        if (container.scrollTop >= maxScroll - 8) {
-          reachedBottom = true;
-          break;
-        }
-
-        container.scrollTop = Math.min(maxScroll, container.scrollTop + Math.max(400, container.clientHeight * 0.8));
-        container.dispatchEvent(new Event('scroll', { bubbles: true }));
-        await M.sleep(260);
-
-        if (collected.size === previousCount) stableRounds += 1;
-        else stableRounds = 0;
-        previousCount = collected.size;
-
-        // Virtualized lists can recycle the same DOM. Refresh the best
-        // scroll container in case WhatsApp changed panel structure.
-        if (stableRounds >= 6) {
-          const refreshed = findContactScrollContainer();
-          if (refreshed) container = refreshed;
-          stableRounds = 0;
-        }
-      }
-    }
-
-    collectVisibleContactNames(document).forEach(name => collected.add(name));
-    reportContacts(Array.from(collected), 'whatsapp_contact_picker');
-
-    // Close the picker without selecting anybody.
     const backButton = findContactPickerBackButton();
     if (backButton) {
       backButton.click();
@@ -168,12 +289,20 @@
       document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', bubbles: true }));
     }
 
+    const records = Array.from(collected.values());
+    const groups = records.filter(record => record.type === 'group').length;
+    const contacts = records.filter(record => record.type === 'contact').length;
+
     return {
-      success: collected.size > 0,
-      verified: collected.size > 0,
-      contacts_synced: collected.size,
-      complete: reachedBottom,
-      partial: !reachedBottom
+      success: records.length > 0,
+      verified: records.length > 0,
+      contacts_synced: records.length,
+      groups_synced: groups,
+      typed_contacts_synced: contacts,
+      complete: Boolean(chatsComplete && contactsComplete),
+      partial: !(chatsComplete && contactsComplete),
+      chat_scan_complete: chatsComplete,
+      contact_picker_complete: contactsComplete
     };
   }
 
@@ -234,7 +363,7 @@
     ));
 
     reportContacts(
-      titled.map(el => cleanContactName(el.getAttribute('title'))).filter(Boolean),
+      titled.map(el => contactRecordFromElement(el)).filter(Boolean),
       'whatsapp_search'
     );
 
@@ -251,12 +380,104 @@
     return { ok: true };
   }
 
+  function extractVisibleMessages(limit = 1) {
+    const main = document.querySelector('#main');
+    if (!main) return [];
+
+    const candidates = Array.from(main.querySelectorAll(
+      '[data-testid="msg-container"], .message-in, .message-out'
+    ));
+    const unique = [];
+    const seen = new Set();
+
+    for (const element of candidates) {
+      const container = element.closest?.(
+        '[data-testid="msg-container"], .message-in, .message-out'
+      ) || element;
+      if (seen.has(container)) continue;
+      seen.add(container);
+
+      const textNodes = Array.from(container.querySelectorAll(
+        'span.selectable-text, [data-pre-plain-text] span, [dir="ltr"]'
+      ));
+      let text = textNodes
+        .map(node => String(node.textContent || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (!text) {
+        text = String(container.innerText || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+      if (!text) continue;
+
+      const metaNode = container.querySelector('[data-pre-plain-text]');
+      const meta = String(metaNode?.getAttribute('data-pre-plain-text') || '').trim();
+      let sender = null;
+      let timestamp = null;
+      const metaMatch = meta.match(/^\[([^\]]+)\]\s*([^:]+):\s*$/);
+      if (metaMatch) {
+        timestamp = metaMatch[1].trim();
+        sender = metaMatch[2].trim();
+      }
+
+      const outgoing = container.classList.contains('message-out') ||
+        Boolean(container.closest('.message-out'));
+      const incoming = container.classList.contains('message-in') ||
+        Boolean(container.closest('.message-in'));
+
+      unique.push({
+        text,
+        sender,
+        timestamp,
+        direction: outgoing ? 'outgoing' : (incoming ? 'incoming' : 'unknown')
+      });
+    }
+
+    return unique.slice(-Math.max(1, Math.min(Number(limit) || 1, 20)));
+  }
+
   async function handle(command) {
     if (command.action === 'sync_contacts') {
       return await syncAllContacts();
     }
 
     const recipient = String(command.recipient || '').trim();
+
+    if (command.action === 'read_messages') {
+      const useCurrent = ['current chat', 'current conversation'].includes(M.normalize(recipient));
+      if (!useCurrent) {
+        const selected = await selectContact(recipient);
+        if (!selected.ok) {
+          return { success: false, verified: false, error: selected.error };
+        }
+        await M.sleep(500);
+      }
+
+      const composer = await M.waitFor(findComposer, 7000);
+      if (!composer) {
+        return {
+          success: false,
+          verified: false,
+          error: 'WhatsApp chat did not become active, so MAYA refused to report messages.'
+        };
+      }
+
+      const messages = extractVisibleMessages(command.limit || 1);
+      return {
+        success: true,
+        verified: true,
+        service: 'whatsapp',
+        recipient: recipient || 'current chat',
+        messages,
+        count: messages.length,
+        latest: messages.length ? messages[messages.length - 1] : null,
+        live_read: true
+      };
+    }
     const message = String(command.message || '').trim();
 
     const useCurrentChat = ['current chat', 'current conversation'].includes(M.normalize(recipient));
