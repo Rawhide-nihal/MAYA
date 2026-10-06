@@ -437,6 +437,49 @@ class CommunicationAgent:
         result["local_typed_contact_count"] = sum(1 for r in local_records if r.get("type") == "contact")
         return result
 
+    def read_and_reply(
+        self,
+        recipient: str,
+        message: str,
+        service: str = "whatsapp",
+        profile: Optional[str] = "main",
+    ) -> Dict[str, Any]:
+        """Read the latest live message, then send the user's explicit reply."""
+        live = self.read_messages(
+            recipient=recipient,
+            limit=1,
+            service=service,
+            profile=profile,
+        )
+        if not live.get("success") or not live.get("verified"):
+            return {
+                "success": False,
+                "verified": False,
+                "service": service,
+                "recipient": recipient,
+                "live_read": live,
+                "error": live.get("error", "Could not verify the latest message before replying."),
+            }
+
+        sent = self.send(
+            service=service,
+            recipient=recipient,
+            message=message,
+            profile=profile,
+        )
+        return {
+            "success": bool(sent.get("success") and sent.get("verified") and sent.get("sent")),
+            "verified": bool(sent.get("verified") and sent.get("sent")),
+            "service": service,
+            "recipient": recipient,
+            "latest_read": live.get("latest"),
+            "messages": live.get("messages") or [],
+            "reply_message": message,
+            "send_result": sent,
+            "sent": bool(sent.get("sent")),
+            "error": sent.get("error"),
+        }
+
     def prepare(
         self,
         service: str,
