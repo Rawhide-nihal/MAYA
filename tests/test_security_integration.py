@@ -381,6 +381,27 @@ class TestSecurityIntegration(unittest.TestCase):
         )
         self.assertEqual(after_completion.status_code, 404)
 
+    def test_contact_search_api_requires_auth(self):
+        unauth = self.client.get(
+            "/api/communication/search?service=whatsapp&q=Niteesh"
+        )
+        self.assertEqual(unauth.status_code, 401)
+
+        communication_bridge.update_contacts(
+            "whatsapp",
+            [{"name": "Nitheesh Kumar", "type": "contact"}],
+            source="security_test"
+        )
+        auth = self.client.get(
+            "/api/communication/search?service=whatsapp&q=Nithees%20Kumar&type=contact",
+            headers=self.auth_headers
+        )
+        self.assertEqual(auth.status_code, 200)
+        payload = auth.get_json()
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["result"]["matched"])
+        self.assertEqual(payload["result"]["name"], "Nitheesh Kumar")
+
     def test_contact_index_api_requires_auth(self):
         unauthorized = self.client.post(
             "/api/communication/contacts",
