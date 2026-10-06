@@ -495,6 +495,30 @@ class DeterministicIntentClassifier:
                 "summary": f"Look up {query} in the local WhatsApp contact index"
             }
 
+        pronoun_message = re.match(
+            r"^(?:(?:can|could|would)\s+(?:you|u)\s+)?"
+            r"(?:message|msg|text)\s+"
+            r"(him|her|them|that\s+contact|this\s+contact|that\s+person|this\s+person|that\s+guy|this\s+guy)"
+            r"(?:\s+on\s+whatsapp)?"
+            r"(?:\s*(?::|,)\s*|\s+(?:saying|that)\s+)(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if pronoun_message:
+            recipient_ref, message = pronoun_message.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": "whatsapp",
+                    "recipient": recipient_ref.strip(),
+                    "message": message.strip(),
+                    "profile": "main"
+                },
+                "confidence": 0.995,
+                "summary": f"Send WhatsApp message to {recipient_ref.strip()}"
+            }
+
         # Authenticated communication fallback.
         # Conservative parsing keeps ambiguous recipients from being sent accidentally.
         email_subject = re.match(
