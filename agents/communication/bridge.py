@@ -28,6 +28,10 @@ class CommunicationBridge:
         self._results: Dict[str, Dict[str, Any]] = {}
         self._last_extension_seen: Optional[float] = None
         self._browser_context: Dict[str, Any] = {}
+        self._browser_actions: Deque[str] = deque()
+        self._browser_action_payloads: Dict[str, Dict[str, Any]] = {}
+        self._browser_action_events: Dict[str, threading.Event] = {}
+        self._browser_action_results: Dict[str, Dict[str, Any]] = {}
         self._contacts_path = MAYA_DATA_DIR / "communication_contacts.json"
         self._contacts: Dict[str, Dict[str, Dict[str, Any]]] = {
             "whatsapp": {},
@@ -253,6 +257,60 @@ class CommunicationBridge:
     def get_browser_context(self) -> Dict[str, Any]:
         with self._lock:
             return dict(self._browser_context)
+
+    def submit_browser_action(self, action: Dict[str, Any], timeout: float = 8.0) -> Dict[str, Any]:
+        """Queue a privileged Chrome-extension background action such as focusing a service tab."""
+        action_id = uuid.uuid4().hex
+        payload = dict(action)
+        payload["action_id"] = action_id
+        payload["created_at"] = time.time()
+        event = threading.Event()
+
+        with self._lock:
+            self._browser_action_payloads[action_id] = payload
+            self._browser_action_events[action_id] = event
+            self._browser_actions.append(action_id)
+
+        if not event.wait(timeout=max(1.0, timeout)):
+            with self._lock:
+                self._browser_action_payloads.pop(action_id, None)
+                self._browser_action_events.pop(action_id, None)
+                try:
+                    self._browser_actions.remove(action_id)
+                except ValueError:
+                    pass
+            return {
+                "success": False,
+                "verified": False,
+                "action_id": action_id,
+                "error": "MAYA Browser Bridge did not respond to the browser action in time.",
+            }
+
+        with self._lock:
+            result = dict(self._browser_action_results.pop(action_id, {}))
+            self._browser_action_events.pop(action_id, None)
+            self._browser_action_payloads.pop(action_id, None)
+        result.setdefault("action_id", action_id)
+        return result
+
+    def next_browser_action(self) -> Optional[Dict[str, Any]]:
+        self.heartbeat()
+        with self._lock:
+            while self._browser_actions:
+                action_id = self._browser_actions.popleft()
+                payload = self._browser_action_payloads.get(action_id)
+                if payload:
+                    return dict(payload)
+        return None
+
+    def complete_browser_action(self, action_id: str, result: Dict[str, Any]) -> bool:
+        with self._lock:
+            event = self._browser_action_events.get(action_id)
+            if not event:
+                return False
+            self._browser_action_results[action_id] = dict(result)
+            event.set()
+            return True
 
     def submit(self, command: Dict[str, Any], timeout: float = 25.0) -> Dict[str, Any]:
         service = str(command.get("service", "")).lower().strip()
