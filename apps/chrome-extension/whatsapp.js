@@ -499,6 +499,23 @@
     const union = new Set([...qTokens, ...cTokens]).size || 1;
     const tokenScore = (intersection / union) * 0.93;
 
+    let tokenFuzzy = 0;
+    if (qTokens.size && cTokens.size) {
+      const parts = [...qTokens].map(qToken => {
+        let best = 0;
+        for (const cToken of cTokens) {
+          const dist = levenshtein(qToken, cToken);
+          const edit = 1 - (dist / Math.max(qToken.length, cToken.length, 1));
+          const prefixLike = (
+            qToken.startsWith(cToken) || cToken.startsWith(qToken)
+          ) ? 0.96 : 0;
+          best = Math.max(best, edit, prefixLike);
+        }
+        return best;
+      });
+      tokenFuzzy = parts.reduce((sum, value) => sum + value, 0) / parts.length;
+    }
+
     const distance = levenshtein(q, c);
     const editScore = 1 - (distance / Math.max(q.length, c.length, 1));
 
@@ -523,7 +540,8 @@
       prefix,
       substring,
       tokenScore,
-      (0.72 * editScore) + (0.28 * bigramScore)
+      0.94 * tokenFuzzy,
+      (0.62 * editScore) + (0.23 * bigramScore) + (0.15 * tokenFuzzy)
     );
   }
 
