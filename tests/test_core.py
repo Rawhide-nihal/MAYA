@@ -805,7 +805,7 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertTrue(prefix["matched"])
         self.assertEqual(prefix["name"], "Project Phoenix")
 
-        ambiguous = bridge.resolve_contact("whatsapp", "Nites")
+        ambiguous = bridge.resolve_contact("whatsapp", "Nit")
         self.assertFalse(ambiguous["matched"])
         self.assertTrue(ambiguous["ambiguous"])
         self.assertGreaterEqual(len(ambiguous["suggestions"]), 2)
