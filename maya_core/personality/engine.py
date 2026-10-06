@@ -245,6 +245,51 @@ class PersonalityEngine:
             + "- Never let personality override truthfulness, permissions, or action verification.\n"
         )
 
+    def direct_social_reply(self, text: str) -> Optional[str]:
+        """
+        Instant high-confidence personality replies for tiny social/identity turns.
+
+        Small local models often flatten these into generic customer-service
+        phrases. Keep this deliberately narrow so real questions still go to
+        the neural conversational model.
+        """
+        cleaned = re.sub(
+            r"^(?:hey\s+)?maya\b[\s,:;\-]*",
+            "",
+            (text or "").strip(),
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip().lower()
+        normalized = re.sub(r"[^a-z0-9?' ]+", " ", cleaned)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+        how_are_you = {
+            "how are you", "how are you?", "how you doing", "how you doing?",
+            "how r u", "how r u?", "how are u", "how are u?",
+            "how's it going", "hows it going", "you good", "u good"
+        }
+        if normalized in how_are_you:
+            return (
+                "Running smoothly, Boss. No existential crisis in the last thirty seconds, "
+                "so I’d call that a win. What’s up?"
+            )
+
+        identity = {
+            "ur maya", "you are maya", "you're maya", "youre maya",
+            "are you maya", "are u maya", "u maya", "your maya"
+        }
+        if normalized in identity:
+            return (
+                "That would be me, Boss. Unless another AI moved into your PC "
+                "without paying rent."
+            )
+
+        greetings = {"hi", "hello", "hey", "yo", "sup", "what's up", "whats up"}
+        if normalized in greetings:
+            return "Hey, Boss. I’m here. What are we breaking—sorry, building—today?"
+
+        return None
+
     def describe_mode(self, mode: MayaMode) -> str:
         descriptions = {
             MayaMode.NORMAL: "Normal mode: balanced answers, natural conversation and occasional humor.",
