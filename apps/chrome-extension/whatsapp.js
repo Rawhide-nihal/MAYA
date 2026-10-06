@@ -487,7 +487,7 @@
     return { ok: true };
   }
 
-  function extractVisibleMessages(limit = 1) {
+  function extractVisibleMessages(limit = 1, incomingOnly = false) {
     const main = document.querySelector('#main');
     if (!main) return [];
 
@@ -536,11 +536,14 @@
       const incoming = container.classList.contains('message-in') ||
         Boolean(container.closest('.message-in'));
 
+      const direction = outgoing ? 'outgoing' : (incoming ? 'incoming' : 'unknown');
+      if (incomingOnly && direction !== 'incoming') continue;
+
       unique.push({
         text,
         sender,
         timestamp,
-        direction: outgoing ? 'outgoing' : (incoming ? 'incoming' : 'unknown')
+        direction
       });
     }
 
@@ -589,7 +592,10 @@
         };
       }
 
-      const messages = extractVisibleMessages(command.limit || 1);
+      const messages = extractVisibleMessages(
+        command.limit || 1,
+        Boolean(command.incoming_only)
+      );
       return {
         success: true,
         verified: true,
