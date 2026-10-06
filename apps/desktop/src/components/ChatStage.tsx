@@ -10,7 +10,8 @@ import {
   AlertTriangle,
   ShieldAlert,
   X,
-  Play
+  Play,
+  Loader2
 } from 'lucide-react';
 import { MayaCoreCanvas } from './MayaCoreCanvas';
 import { MayaApi, ChatResponse } from '../services/api';
@@ -27,6 +28,7 @@ export interface ChatMessage {
   confirmationId?: string;
   confirmationHandled?: boolean;
   planId?: string;
+  pending?: boolean;
 }
 
 interface ChatStageProps {
@@ -238,9 +240,19 @@ export const ChatStage: React.FC<ChatStageProps> = ({
   };
 
   // Sync external props if provided
-  const activeCoreState = externalCoreState || internalCoreState;
-  const activeSubState = externalSubState || internalSubState;
-  const activeStatusText = externalStatusText || internalStatusText;
+  const externalBusy = Boolean(externalCoreState && externalCoreState !== 'IDLE');
+  const activeCoreState = externalBusy
+    ? externalCoreState!
+    : internalCoreState;
+  const activeSubState = externalBusy && externalSubState
+    ? externalSubState
+    : internalSubState;
+  const activeStatusText = (
+    externalStatusText &&
+    externalStatusText !== 'Ready for your command.'
+  )
+    ? externalStatusText
+    : internalStatusText;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: isProcessing ? 'auto' : 'smooth' });
@@ -248,13 +260,16 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
   useEffect(() => {
     try {
-      const safeHistory = messages.slice(-250).map((message) => ({
-        id: message.id,
-        sender: message.sender,
-        text: message.text,
-        time: message.time,
-        waveform: Boolean(message.waveform)
-      }));
+      const safeHistory = messages
+        .filter((message) => !message.pending)
+        .slice(-250)
+        .map((message) => ({
+          id: message.id,
+          sender: message.sender,
+          text: message.text,
+          time: message.time,
+          waveform: Boolean(message.waveform)
+        }));
       localStorage.setItem('maya.chat.history.v1', JSON.stringify(safeHistory));
     } catch {
       // Conversation rendering must not fail if browser storage is unavailable.
@@ -265,7 +280,11 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     setExpandedDetails(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const handleSend = async (textToSend?: string, permissionToken?: string) => {
+  const handleSend = async (
+    textToSend?: string,
+    permissionToken?: string,
+    showUserMessage: boolean = true
+  ) => {
     const text = textToSend || inputMessage.trim();
     if (!text || isProcessing) return;
 
@@ -276,7 +295,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    if (!textToSend) {
+    if (showUserMessage) {
       const userMsg: ChatMessage = {
         id: `user-${Date.now()}`,
         sender: 'user',
@@ -289,10 +308,23 @@ export const ChatStage: React.FC<ChatStageProps> = ({
     setIsProcessing(true);
     setInternalCoreState('THINKING');
     setInternalSubState('ANALYZE');
-    setInternalStatusText('Thinking...');
+    setInternalStatusText('Thinking…');
 
-    let streamMessageId: string | null = null;
+    const pendingId = `maya-pending-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    let streamMessageId: string = pendingId;
     let streamedText = '';
+
+    setMessages(prev => [
+      ...prev,
+      {
+        id: pendingId,
+        sender: 'maya',
+        text: '',
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        waveform: false,
+        pending: true
+      }
+    ]);
 
     try {
       const resp: ChatResponse = await MayaApi.sendChatMessageStream(
@@ -301,24 +333,16 @@ export const ChatStage: React.FC<ChatStageProps> = ({
         (delta: string) => {
           if (!delta) return;
           streamedText += delta;
-          setInternalStatusText('Maya is responding...');
+          setInternalStatusText('Maya is responding…');
 
-          if (!streamMessageId) {
-            streamMessageId = `maya-stream-${Date.now()}`;
-            const streamingMsg: ChatMessage = {
-              id: streamMessageId,
-              sender: 'maya',
-              text: streamedText,
-              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              waveform: false
-            };
-            setMessages(prev => [...prev, streamingMsg]);
-          } else {
-            const id = streamMessageId;
-            setMessages(prev =>
-              prev.map(msg => msg.id === id ? { ...msg, text: streamedText } : msg)
-            );
-          }
+          const id = streamMessageId;
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === id
+                ? { ...msg, text: streamedText, pending: false }
+                : msg
+            )
+          );
         }
       );
 
@@ -327,16 +351,11 @@ export const ChatStage: React.FC<ChatStageProps> = ({
       }
 
       if (resp.requires_confirmation) {
-        if (streamMessageId) {
-          const id = streamMessageId;
-          setMessages(prev => prev.filter(msg => msg.id !== id));
-        }
-
         setInternalCoreState('WARNING');
         setInternalStatusText('Authorization required for execution.');
 
         const confirmMsg: ChatMessage = {
-          id: `maya-confirm-${Date.now()}`,
+          id: pendingId,
           sender: 'maya',
           text: resp.reply,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -344,40 +363,30 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           confirmationId: resp.confirmation_id,
           planId: resp.plan_id,
           details: resp.details,
-          tasks: resp.tasks
+          tasks: resp.tasks,
+          pending: false
         };
-        setMessages(prev => [...prev, confirmMsg]);
+        setMessages(prev =>
+          prev.map(msg => msg.id === pendingId ? confirmMsg : msg)
+        );
         setIsProcessing(false);
         return;
       }
 
-      if (streamMessageId) {
-        const id = streamMessageId;
-        setMessages(prev =>
-          prev.map(msg =>
-            msg.id === id
-              ? {
-                  ...msg,
-                  text: resp.reply || streamedText,
-                  details: resp.details,
-                  tasks: resp.tasks,
-                  waveform: true
-                }
-              : msg
-          )
-        );
-      } else {
-        const mayaMsg: ChatMessage = {
-          id: `maya-${Date.now()}`,
-          sender: 'maya',
-          text: resp.reply,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          details: resp.details,
-          tasks: resp.tasks,
-          waveform: true
-        };
-        setMessages(prev => [...prev, mayaMsg]);
-      }
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === pendingId
+            ? {
+                ...msg,
+                text: resp.reply || streamedText || 'Done.',
+                details: resp.details,
+                tasks: resp.tasks,
+                waveform: true,
+                pending: false
+              }
+            : msg
+        )
+      );
 
       onActionCompleted?.();
       setInternalCoreState('IDLE');
@@ -390,28 +399,20 @@ export const ChatStage: React.FC<ChatStageProps> = ({
       setInternalStatusText('Service error.');
       setIsProcessing(false);
 
-      if (streamMessageId) {
-        const id = streamMessageId;
-        setMessages(prev =>
-          prev.map(msg =>
-            msg.id === id
-              ? { ...msg, text: streamedText || 'The response stream was interrupted.' }
-              : msg
-          )
-        );
-      } else {
-        setMessages(prev => [
-          ...prev,
-          {
-            id: `maya-err-${Date.now()}`,
-            sender: 'maya',
-            text: `I encountered an issue connecting to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          }
-        ]);
-      }
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === pendingId
+            ? {
+                ...msg,
+                pending: false,
+                text: streamedText || `I hit an issue talking to Maya Core: ${err.message || 'Make sure maya_server.py is running.'}`
+              }
+            : msg
+        )
+      );
     }
   };
+
   const handleConfirmAction = async (msgId: string, confirmationId: string, approved: boolean, planId?: string) => {
     // Mark confirmation handled in UI
     setMessages(prev =>
@@ -464,7 +465,7 @@ export const ChatStage: React.FC<ChatStageProps> = ({
           setInternalStatusText('Verified and complete.');
           setIsProcessing(false);
         } else {
-          await handleSend('Proceed with confirmed action', res.permission_token);
+          await handleSend('Proceed with confirmed action', res.permission_token, false);
         }
       } else {
         setMessages(prev => [
@@ -586,7 +587,19 @@ export const ChatStage: React.FC<ChatStageProps> = ({
 
               <div className="flex-1">
                 <div className="p-3.5 rounded-2xl glass-panel text-slate-100 text-[13px] leading-relaxed border border-blue-500/25 shadow-[0_0_15px_rgba(37,99,235,0.1)]">
-                  <p className="whitespace-pre-wrap">{msg.text}</p>
+                  {msg.pending ? (
+                    <div className="flex items-center space-x-2 text-cyan-200">
+                      <Loader2 size={15} className="animate-spin shrink-0" />
+                      <span>{activeStatusText || 'MAYA is working…'}</span>
+                      <span className="inline-flex items-end space-x-0.5" aria-hidden="true">
+                        <span className="w-1 h-1 rounded-full bg-cyan-400 animate-bounce" />
+                        <span className="w-1 h-1 rounded-full bg-cyan-400 animate-bounce [animation-delay:120ms]" />
+                        <span className="w-1 h-1 rounded-full bg-cyan-400 animate-bounce [animation-delay:240ms]" />
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="whitespace-pre-wrap">{msg.text}</p>
+                  )}
 
                   {/* Interactive Permission Authorization Card */}
                   {msg.requiresConfirmation && !msg.confirmationHandled && msg.confirmationId && (
