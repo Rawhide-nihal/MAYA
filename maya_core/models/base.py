@@ -533,7 +533,11 @@ class DeterministicIntentClassifier:
 
                 # Check if user also asked to check project or scan errors
                 check_proj = "check" in lower or "scan" in lower or "error" in lower or "project" in lower
-                arguments = {"application": app_name}
+                force_new = bool(re.search(
+                    r"\b(?:new\s+(?:window|instance|tab)|fresh(?:ly)?|newly|another\s+(?:window|instance|tab))\b",
+                    lower
+                ))
+                arguments = {"application": app_name, "force_new": force_new}
                 if profile_hint:
                     arguments["profile"] = profile_hint
 
