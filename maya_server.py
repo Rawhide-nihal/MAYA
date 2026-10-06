@@ -464,6 +464,31 @@ def communication_contacts_list():
     })
 
 
+@app.route("/api/communication/search", methods=["GET"])
+def communication_search():
+    req_token = request.headers.get("X-Maya-Token", "").strip()
+    if not req_token or not hmac.compare_digest(req_token, AUTH_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    service = request.args.get("service", "whatsapp").strip().lower()
+    query = request.args.get("q", "").strip()
+    record_type = request.args.get("type", "").strip().lower() or None
+    if not query:
+        return jsonify({"success": False, "error": "q is required"}), 400
+
+    result = communication_bridge.resolve_contact(
+        service,
+        query,
+        record_type=record_type,
+    )
+    return jsonify({
+        "success": True,
+        "service": service,
+        "query": query,
+        "result": result,
+    })
+
+
 @app.route("/api/communication/status", methods=["GET"])
 def communication_status():
     req_token = request.headers.get("X-Maya-Token", "").strip()
