@@ -74,6 +74,102 @@ async function reportActiveTabContext() {
   }
 }
 
+async function pollBrowserAction() {
+  try {
+    const token = await getToken();
+    const response = await fetch(`${MAYA_API}/browser/action/next`, {
+      headers: { 'X-Maya-Token': token }
+    });
+    if (response.status === 401) {
+      sessionToken = null;
+      return;
+    }
+    if (!response.ok) return;
+    const data = await response.json();
+    const action = data?.action;
+    if (!action?.action_id) return;
+
+    let result = {
+      success: false,
+      verified: false,
+      error: 'Unsupported browser action.'
+    };
+
+    if (action.type === 'focus_service') {
+      const service = String(action.service || '').toLowerCase();
+      const servicePrefixes = {
+        whatsapp: 'https://web.whatsapp.com/',
+        gmail: 'https://mail.google.com/',
+        telegram: 'https://web.telegram.org/'
+      };
+      const targetUrl = String(action.url || servicePrefixes[service] || '');
+      const forceNew = Boolean(action.force_new);
+
+      if (!targetUrl) {
+        result = {
+          success: false,
+          verified: false,
+          error: `Unsupported browser service: ${service}`
+        };
+      } else {
+        let targetTab = null;
+        if (!forceNew) {
+          const candidates = await chrome.tabs.query({});
+          targetTab = candidates.find(tab =>
+            typeof tab.url === 'string' &&
+            tab.url.startsWith(targetUrl)
+          ) || null;
+        }
+
+        if (targetTab?.id != null) {
+          await chrome.tabs.update(targetTab.id, { active: true });
+          if (targetTab.windowId != null) {
+            await chrome.windows.update(targetTab.windowId, { focused: true });
+          }
+          result = {
+            success: true,
+            verified: true,
+            reused_existing: true,
+            tab_id: targetTab.id,
+            window_id: targetTab.windowId ?? null,
+            url: targetTab.url || targetUrl,
+            service
+          };
+        } else {
+          const created = await chrome.tabs.create({ url: targetUrl, active: true });
+          result = {
+            success: Boolean(created?.id),
+            verified: Boolean(created?.id),
+            reused_existing: false,
+            created_new: true,
+            tab_id: created?.id ?? null,
+            window_id: created?.windowId ?? null,
+            url: created?.url || targetUrl,
+            service
+          };
+        }
+      }
+    }
+
+    await fetch(`${MAYA_API}/browser/action/result`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Maya-Token': token
+      },
+      body: JSON.stringify({
+        action_id: action.action_id,
+        result
+      })
+    });
+    reportActiveTabContext();
+  } catch {
+    // MAYA may be offline.
+  }
+}
+
+setInterval(pollBrowserAction, 500);
+
 setInterval(reportActiveTabContext, 1500);
 reportActiveTabContext();
 
