@@ -49,6 +49,32 @@ class CommunicationAgent:
         }
         return aliases.get(value, value)
 
+    def _attach_active_browser_tab(
+        self,
+        result: Dict[str, Any],
+        expected_url_prefix: str,
+        timeout: float = 1.4,
+    ) -> Dict[str, Any]:
+        """Attach the Browser Bridge's active tab id after a Windows/UIA fallback."""
+        getter = getattr(self.bridge, "get_browser_context", None)
+        if not callable(getter):
+            return result
+
+        deadline = time.time() + max(0.1, timeout)
+        while time.time() < deadline:
+            context = getter() or {}
+            url = str(context.get("url") or "")
+            tab_id = context.get("tab_id")
+            if tab_id is not None and url.startswith(expected_url_prefix):
+                result["tab_id"] = tab_id
+                result["window_id"] = context.get("window_id")
+                result["url"] = url
+                result["bridge_tab_bound"] = True
+                return result
+            time.sleep(0.10)
+        result["bridge_tab_bound"] = False
+        return result
+
     def open_service(
         self,
         service: str,
@@ -106,7 +132,10 @@ class CommunicationAgent:
                     tab_result["profile"] = profile or "main"
                     tab_result["browser_bridge_fallback"] = True
                     tab_result["browser_bridge_error"] = browser_result.get("error")
-                    return tab_result
+                    return self._attach_active_browser_tab(
+                        tab_result,
+                        SERVICE_URLS[service_name],
+                    )
 
         # No verified existing service tab was found, or the user explicitly
         # requested a new/fresh tab. Create one in the exact configured profile.
@@ -139,7 +168,11 @@ class CommunicationAgent:
                 "error",
                 browser_result.get("error") or "Could not open the communication service."
             )
-        return fallback
+            return fallback
+        return self._attach_active_browser_tab(
+            fallback,
+            SERVICE_URLS[service_name],
+        )
 
     def read_messages(
         self,
