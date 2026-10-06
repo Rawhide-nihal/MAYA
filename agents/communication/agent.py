@@ -64,12 +64,21 @@ class CommunicationAgent:
                 "error": "Service must be gmail, whatsapp, or telegram.",
             }
 
-        browser_result = self.bridge.submit_browser_action({
-            "type": "focus_service",
-            "service": service_name,
-            "url": SERVICE_URLS[service_name],
-            "force_new": bool(force_new),
-        }, timeout=6.0)
+        submit_browser = getattr(self.bridge, "submit_browser_action", None)
+        browser_result = (
+            submit_browser({
+                "type": "focus_service",
+                "service": service_name,
+                "url": SERVICE_URLS[service_name],
+                "force_new": bool(force_new),
+            }, timeout=6.0)
+            if callable(submit_browser)
+            else {
+                "success": False,
+                "verified": False,
+                "error": "Browser background action bridge is unavailable.",
+            }
+        )
 
         if browser_result.get("success"):
             browser_result.setdefault("service", service_name)
@@ -78,12 +87,20 @@ class CommunicationAgent:
 
         # If the extension background is unavailable, use the configured Chrome
         # profile as a fallback. Opening the URL requires a real launch dispatch.
-        fallback = self.windows.launch_application(
-            "Google Chrome",
-            arguments=[SERVICE_URLS[service_name]],
-            profile=profile or "main",
-            force_new=True,
-        )
+        try:
+            fallback = self.windows.launch_application(
+                "Google Chrome",
+                arguments=[SERVICE_URLS[service_name]],
+                profile=profile or "main",
+                force_new=True,
+            )
+        except TypeError:
+            # Compatibility with narrow test/mocked Windows agents.
+            fallback = self.windows.launch_application(
+                "Google Chrome",
+                arguments=[SERVICE_URLS[service_name]],
+                profile=profile or "main",
+            )
         fallback.setdefault("service", service_name)
         fallback["browser_bridge_fallback"] = True
         if not fallback.get("success"):
