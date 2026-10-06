@@ -220,6 +220,19 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r19["tool"], "open_file")
         self.assertTrue(r19["arguments"]["filepath"].lower().endswith("archive.zip"))
 
+        r20 = self.classifier.classify_and_extract(
+            "Maya, sync my WhatsApp contacts."
+        )
+        self.assertEqual(r20["tool"], "sync_communication_contacts")
+        self.assertEqual(r20["arguments"]["service"], "whatsapp")
+
+        r21 = self.classifier.classify_and_extract(
+            "Can u find a contact Named Niteesh?"
+        )
+        self.assertEqual(r21["tool"], "lookup_communication_contact")
+        self.assertEqual(r21["arguments"]["service"], "whatsapp")
+        self.assertEqual(r21["arguments"]["query"], "Niteesh")
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
@@ -342,9 +355,19 @@ class TestMayaPhase2Core(unittest.TestCase):
         # Verify events were dispatched
         event_names = [e[0] for e in self.events_received]
         self.assertIn("plan.created", event_names)
+        self.assertIn("task.plan.created", event_names)
         self.assertIn("tool.started", event_names)
+        self.assertIn("task.step.started", event_names)
         self.assertIn("tool.completed", event_names)
+        self.assertIn("task.step.completed", event_names)
         self.assertIn("task.completed", event_names)
+
+        plan_created_payload = next(
+            payload for name, payload in self.events_received
+            if name == "plan.created"
+        )
+        self.assertTrue(plan_created_payload.get("steps"))
+        self.assertIn("description", plan_created_payload["steps"][0])
 
     # 6. Real Hardware Telemetry (Zero fake data)
     def test_hardware_profiler(self):
@@ -486,6 +509,8 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertIsNotNone(default_tool_registry.get("open_file"))
         self.assertIsNotNone(default_tool_registry.get("copy_file_to_clipboard"))
 
+        self.assertIsNotNone(default_tool_registry.get("lookup_communication_contact"))
+
         # Verify argument validation
         valid, err = default_tool_registry.validate_call("open_application", {"application": "VS Code"})
         self.assertTrue(valid)
@@ -624,6 +649,125 @@ class TestMayaPhase2Core(unittest.TestCase):
             else:
                 os.environ["MAYA_SCREENSHOT_DIR"] = original
 
+    def test_contact_lookup_and_grounded_followup_status(self):
+        bridge = CommunicationBridge()
+        bridge._contacts_path = Path(self.temp_dir.name) / "grounded_contacts.json"
+        bridge._contacts = {"whatsapp": {}, "telegram": {}, "gmail": {}}
+        bridge.update_contacts("whatsapp", ["Niteesh", "Rahul"], source="unit_test")
+        self.planner.communication.bridge = bridge
+
+        lookup = self.planner.communication.lookup_contact("whatsapp", "Niteesh")
+        self.assertTrue(lookup["success"])
+        self.assertTrue(lookup["found"])
+        self.assertEqual(lookup["name"], "Niteesh")
+
+        sync_result = {
+            "success": True,
+            "verified": True,
+            "contacts_synced": 2,
+            "local_contact_count": 2,
+            "complete": True,
+            "partial": False,
+        }
+        self.ledger.record_action(ActionRecord(
+            action_id="sync-followup",
+            plan_id="plan-sync",
+            tool_name="sync_communication_contacts",
+            arguments={"service": "whatsapp", "profile": "main"},
+            affected_resources=[],
+            previous_state=None,
+            result=sync_result,
+            verified=True,
+            undo_available=False,
+            status="success",
+            timestamp=time.time(),
+            summary="Synced WhatsApp contacts"
+        ))
+
+        sync_followup = self.brain.process_request("Did u sync them?")
+        self.assertEqual(sync_followup["intent"], "ACTION_STATUS")
+        self.assertTrue(sync_followup["verified"])
+        self.assertIn("2 contact/chat", sync_followup["reply"])
+        self.assertFalse(self.brain.is_fast_conversation("Did u sync them?"))
+
+        lookup_result = {
+            "success": True,
+            "verified": True,
+            "found": True,
+            "service": "whatsapp",
+            "query": "Niteesh",
+            "name": "Niteesh",
+            "indexed_count": 2,
+        }
+        self.ledger.record_action(ActionRecord(
+            action_id="lookup-followup",
+            plan_id="plan-lookup",
+            tool_name="lookup_communication_contact",
+            arguments={"service": "whatsapp", "query": "Niteesh"},
+            affected_resources=[],
+            previous_state=None,
+            result=lookup_result,
+            verified=True,
+            undo_available=False,
+            status="success",
+            timestamp=time.time() + 0.01,
+            summary="Found Niteesh"
+        ))
+
+        found_followup = self.brain.process_request("Did u find?")
+        self.assertEqual(found_followup["intent"], "ACTION_STATUS")
+        self.assertIn("Niteesh", found_followup["reply"])
+        self.assertIn("found", found_followup["reply"].lower())
+
+    def test_verified_contact_result_synthesis_does_not_invent(self):
+        from maya_core.brain.decision import NeuralDecision
+
+        decision = NeuralDecision(
+            decision_type="tool_call",
+            tool="lookup_communication_contact",
+            arguments={"service": "whatsapp", "query": "Niteesh"},
+            confidence=1.0,
+        )
+        found = self.brain._synthesize_natural_response(
+            "Find Niteesh",
+            decision,
+            {
+                "state": "COMPLETED",
+                "steps": [],
+                "last_result": {
+                    "success": True,
+                    "verified": True,
+                    "found": True,
+                    "query": "Niteesh",
+                    "name": "Niteesh",
+                }
+            }
+        )
+        self.assertIn("Niteesh", found)
+        self.assertIn("Found", found)
+
+        missing = self.brain._synthesize_natural_response(
+            "Find Unknown Person",
+            NeuralDecision(
+                decision_type="tool_call",
+                tool="lookup_communication_contact",
+                arguments={"service": "whatsapp", "query": "Unknown Person"},
+                confidence=1.0,
+            ),
+            {
+                "state": "COMPLETED",
+                "steps": [],
+                "last_result": {
+                    "success": True,
+                    "verified": True,
+                    "found": False,
+                    "ambiguous": False,
+                    "query": "Unknown Person",
+                }
+            }
+        )
+        self.assertIn("couldn't find", missing.lower())
+
     def test_chrome_configured_profile_beats_last_used_and_default_alias(self):
         original_profile = settings.get("chrome_main_profile", "")
         original_account = settings.get("chrome_main_account", "")
@@ -696,6 +840,14 @@ class TestMayaPhase2Core(unittest.TestCase):
             )
             serious_prompt = personality.prompt_fragment("There is a security breach")
             self.assertIn("Do not use humor", serious_prompt)
+
+            casual_prompt = personality.prompt_fragment("How are you doing?")
+            self.assertIn("generic customer-service bot", casual_prompt)
+            self.assertIn("slightly sarcastic", casual_prompt)
+            self.assertGreaterEqual(
+                personality.policy("How are you doing?").max_new_tokens,
+                80
+            )
         finally:
             settings.set("maya_mode", original_mode)
 
