@@ -638,7 +638,8 @@ class WindowsAgent:
         app_name: str,
         arguments: Optional[List[str]] = None,
         cwd: Optional[str] = None,
-        profile: Optional[str] = None
+        profile: Optional[str] = None,
+        force_new: bool = False,
     ) -> Dict[str, Any]:
         """
         Launch an application and verify the real Windows application state.
@@ -647,6 +648,20 @@ class WindowsAgent:
         process and let the short-lived launcher PID exit. That is normal and
         must not be reported as an application crash.
         """
+        if not force_new and self.is_application_running(app_name):
+            focused = self.focus_application(app_name)
+            if focused.get("success"):
+                return {
+                    "success": True,
+                    "verified": True,
+                    "application": app_name,
+                    "reused_existing": True,
+                    "focused": True,
+                    "hwnd": focused.get("hwnd"),
+                    "title": focused.get("title"),
+                    "message": f"Reused the existing {app_name} window.",
+                }
+
         app_path = self.find_application_path(app_name)
         if not app_path:
             cmd = ["powershell", "-NoProfile", "-Command", f"Start-Process '{app_name}'"]
@@ -839,6 +854,68 @@ class WindowsAgent:
                 return {"success": False, "pid": pid, "verified": False, "error": str(ex)}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def focus_application(self, app_name: str) -> Dict[str, Any]:
+        """Restore/focus a visible window owned by the requested application."""
+        if not HAS_WIN32:
+            return {"success": False, "verified": False, "error": "win32gui not available"}
+
+        executable = self.find_application_path(app_name)
+        aliases = set(self._application_process_aliases(app_name, executable))
+        target_hwnd = None
+        target_title = None
+        target_pid = None
+
+        def _enum(hwnd, _):
+            nonlocal target_hwnd, target_title, target_pid
+            if target_hwnd is not None or not win32gui.IsWindowVisible(hwnd):
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                proc_name = self._normalize_process_name(psutil.Process(pid).name())
+            except Exception:
+                return
+            if proc_name not in aliases:
+                return
+            title = str(win32gui.GetWindowText(hwnd) or "").strip()
+            if not title:
+                return
+            target_hwnd = hwnd
+            target_title = title
+            target_pid = pid
+
+        try:
+            win32gui.EnumWindows(_enum, None)
+        except Exception as exc:
+            return {"success": False, "verified": False, "error": str(exc)}
+
+        if target_hwnd is None:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"No visible {app_name} window was found to focus.",
+            }
+
+        try:
+            win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+            try:
+                win32gui.SetForegroundWindow(target_hwnd)
+            except Exception:
+                pass
+            return {
+                "success": True,
+                "verified": True,
+                "hwnd": target_hwnd,
+                "pid": target_pid,
+                "title": target_title,
+                "application": app_name,
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Failed to restore/focus {app_name}: {exc}",
+            }
 
     def focus_window_by_title(self, query: str) -> Dict[str, Any]:
         """Brings the first matching window to the foreground."""
