@@ -233,6 +233,13 @@ class TestMayaPhase2Core(unittest.TestCase):
         self.assertEqual(r21["arguments"]["service"], "whatsapp")
         self.assertEqual(r21["arguments"]["query"], "Niteesh")
 
+        self.assertFalse(
+            self.brain.is_fast_conversation("Maya, sync my WhatsApp contacts.")
+        )
+        self.assertFalse(
+            self.brain.is_fast_conversation("Can u find a contact Named Niteesh?")
+        )
+
     # 2. Permissions V2 Enforcement & Single-Use Tokens
     def test_permission_tier_enforcement(self):
         # Read-only observation is granted under Level 2
