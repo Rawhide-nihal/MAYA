@@ -104,7 +104,19 @@ class DeterministicIntentClassifier:
     ]
 
     def classify_and_extract(self, text: str) -> Dict[str, Any]:
-        cleaned = text.strip()
+        original_text = text.strip()
+        # Natural wake/name prefixes must not prevent deterministic action routing.
+        # "Maya, sync my contacts" and "Hey Maya: open Chrome" are commands,
+        # not ordinary chat merely because the assistant's name came first.
+        cleaned = re.sub(
+            r"^(?:hey\s+)?maya\b[\s,:;\-]*",
+            "",
+            original_text,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not cleaned:
+            cleaned = original_text
         lower = cleaned.lower()
 
         # Check for Critical Destructive Actions
@@ -226,7 +238,8 @@ class DeterministicIntentClassifier:
             }
 
         sync_contacts = re.match(
-            r"^(?:sync|refresh|update|load)\s+(?:my\s+)?(whatsapp)\s+(?:contacts|contact\s+list|chats|contacts\s+and\s+chats)$",
+            r"^(?:sync|refresh|update|load)\s+(?:my\s+)?(whatsapp)\s+"
+            r"(?:contacts|contact\s+list|chats|contacts\s+and\s+chats)[.!?]*$",
             cleaned,
             flags=re.IGNORECASE
         )
@@ -238,6 +251,42 @@ class DeterministicIntentClassifier:
                 "arguments": {"service": service, "profile": "main"},
                 "confidence": 0.99,
                 "summary": f"Synchronize local {service.title()} contacts and chats"
+            }
+
+        contact_lookup = re.match(
+            r"^(?:(?:can|could|would)\s+(?:you|u)\s+)?"
+            r"(?:find|lookup|look\s+up|search\s+for|check\s+for)\s+"
+            r"(?:(?:a|the)\s+)?(?:(whatsapp)\s+)?contact"
+            r"(?:\s+(?:named|called))?\s+(.+?)[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if contact_lookup:
+            service, query = contact_lookup.groups()
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "lookup_communication_contact",
+                "arguments": {
+                    "service": (service or "whatsapp").lower(),
+                    "query": query.strip()
+                },
+                "confidence": 0.995,
+                "summary": f"Look up {query.strip()} in the local {(service or 'WhatsApp').title()} contact index"
+            }
+
+        contact_lookup_alt = re.match(
+            r"^(?:do\s+i\s+have|is)\s+(.+?)\s+(?:in|among)\s+(?:my\s+)?whatsapp\s+contacts[.!?]*$",
+            cleaned,
+            flags=re.IGNORECASE
+        )
+        if contact_lookup_alt:
+            query = contact_lookup_alt.group(1).strip()
+            return {
+                "intent": "INFORMATION_REQUEST",
+                "tool": "lookup_communication_contact",
+                "arguments": {"service": "whatsapp", "query": query},
+                "confidence": 0.99,
+                "summary": f"Look up {query} in the local WhatsApp contact index"
             }
 
         # Authenticated communication fallback.
