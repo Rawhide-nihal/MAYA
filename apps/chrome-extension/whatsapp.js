@@ -348,9 +348,22 @@
       .filter(M.visible)[0] || header;
   }
 
-  function visiblePhoneFromDocument() {
-    const root = document.querySelector('[role="dialog"]') || document.body;
-    const texts = Array.from(root.querySelectorAll('span, div'))
+  function findVisibleContactInfoRoot() {
+    const main = document.querySelector('#main');
+    const candidates = Array.from(document.querySelectorAll(
+      '[role="dialog"], [role="complementary"], [data-testid*="drawer"], [data-testid*="contact-info"], [data-testid*="group-info"]'
+    )).filter(M.visible);
+
+    // Never inspect the chat message pane itself for a contact phone number.
+    // Only accept a separate info surface opened from the chat header.
+    return candidates.find(node => !main || !main.contains(node)) || null;
+  }
+
+  function visiblePhoneFromContactInfo() {
+    const root = findVisibleContactInfoRoot();
+    if (!root) return null;
+
+    const texts = Array.from(root.querySelectorAll('span, div, a'))
       .filter(M.visible)
       .map(el => String(el.textContent || '').trim())
       .filter(text => text.length >= 7 && text.length <= 40);
@@ -379,10 +392,11 @@
     if (header) {
       header.click();
       await M.sleep(700);
-      const visiblePhone = visiblePhoneFromDocument();
+      const visiblePhone = visiblePhoneFromContactInfo();
       if (!record.phone && visiblePhone) record.phone = visiblePhone;
 
-      const infoText = M.normalize(document.body.innerText || '');
+      const infoRoot = findVisibleContactInfoRoot();
+      const infoText = M.normalize(infoRoot?.innerText || '');
       if (record.type === 'unknown' && (infoText.includes('group info') || infoText.includes('participants'))) {
         record.type = 'group';
       }
