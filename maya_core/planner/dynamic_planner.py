@@ -899,6 +899,19 @@ class DynamicTaskPlanner:
             else:
                 summary = f"Failed to prepare {arguments.get('service', 'message')} communication for {arguments.get('recipient', '')}"
 
+        elif tool_name == "read_and_reply_communication":
+            result = self.communication.read_and_reply(
+                service=arguments.get("service", "whatsapp"),
+                recipient=arguments.get("recipient", ""),
+                message=arguments.get("message", ""),
+                profile=arguments.get("profile", "main"),
+            )
+            summary = (
+                f"Read latest WhatsApp message and sent verified reply to {arguments.get('recipient', '')}"
+                if result.get("success") and result.get("verified")
+                else f"Read/reply workflow for {arguments.get('recipient', '')} failed or was not verified"
+            )
+
         elif tool_name == "send_communication":
             result = self.communication.send(
                 service=arguments.get("service", ""),
