@@ -107,6 +107,7 @@ TOOL_PERMISSION_MAP: Dict[str, PermissionLevel] = {
     "clean_temp_files": PermissionLevel.LEVEL_3_MODIFICATION,
     "execute_terminal_command": PermissionLevel.LEVEL_3_MODIFICATION,
     "send_communication": PermissionLevel.LEVEL_3_MODIFICATION,
+    "read_and_reply_communication": PermissionLevel.LEVEL_3_MODIFICATION,
 
     # Critical (Level 4)
     "delete_file": PermissionLevel.LEVEL_4_CRITICAL,
