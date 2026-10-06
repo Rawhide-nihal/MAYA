@@ -190,6 +190,52 @@ class DeterministicIntentClassifier:
                 "summary": f"Send {attachment_ref.strip()} to the current {service} conversation"
             }
 
+        explicit_attachment_send = re.match(
+            r"^(?:send|share)\s+(?:the\s+)?(file|folder)\s+(.+?)\s+to\s+(.+?)"
+            r"\s+(?:on|in|via)\s+(whatsapp|telegram)"
+            r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if explicit_attachment_send:
+            kind, path_text, recipient, service, optional_message = explicit_attachment_send.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": recipient.strip(),
+                    "message": (optional_message or "").strip(),
+                    "profile": "main",
+                    "attachment_path": path_text.strip().strip('"')
+                },
+                "confidence": 0.995,
+                "summary": f"Send {kind} {path_text.strip()} to {recipient.strip()} on {service}"
+            }
+
+        path_attachment_send = re.match(
+            r"^(?:send|share)\s+([A-Za-z]:[\\/].+?)\s+to\s+(.+?)"
+            r"\s+(?:on|in|via)\s+(whatsapp|telegram)"
+            r"(?:\s+(?:saying|with\s+(?:the\s+)?message)\s+(.+))?$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if path_attachment_send:
+            path_text, recipient, service, optional_message = path_attachment_send.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "send_communication",
+                "arguments": {
+                    "service": service.lower(),
+                    "recipient": recipient.strip(),
+                    "message": (optional_message or "").strip(),
+                    "profile": "main",
+                    "attachment_path": path_text.strip().strip('"')
+                },
+                "confidence": 0.995,
+                "summary": f"Send local path {path_text.strip()} to {recipient.strip()} on {service}"
+            }
+
         # Context-linked file/screenshot communication.
         attachment_chat = re.match(
             r"^(?:send|share)\s+((?:this|that|the|latest|previous)\s+(?:screenshot|file|document|attachment))"
@@ -302,6 +348,28 @@ class DeterministicIntentClassifier:
                 "arguments": {"service": "whatsapp", "query": query, "detail": "phone"},
                 "confidence": 0.995,
                 "summary": f"Get stored WhatsApp phone number for {query}"
+            }
+
+        read_and_reply = re.match(
+            r"^(?:read|check)\s+(?:the\s+)?(?:latest|last)\s+(?:whatsapp\s+)?message"
+            r"\s+(?:from|of)\s+(.+?)(?:\s+on\s+whatsapp)?\s+"
+            r"(?:and\s+)?(?:reply|respond)\s+(?:saying|with\s+(?:the\s+)?message|that)\s+(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        if read_and_reply:
+            recipient, message = read_and_reply.groups()
+            return {
+                "intent": "PC_ACTION",
+                "tool": "read_and_reply_communication",
+                "arguments": {
+                    "service": "whatsapp",
+                    "recipient": recipient.strip(),
+                    "message": message.strip(),
+                    "profile": "main"
+                },
+                "confidence": 0.995,
+                "summary": f"Read latest WhatsApp message from {recipient.strip()} and send the explicit reply"
             }
 
         read_latest_messages = re.match(
