@@ -201,10 +201,11 @@ class ToolRegistry:
             "search_memory": lambda query, **kw: {"success": True, "results": memory.search_relevant_memories(query), "verified": True},
             "open_file": lambda filepath, **kw: windows.open_file(filepath),
             "copy_file_to_clipboard": lambda filepath, **kw: windows.copy_file_to_clipboard(filepath),
-            "open_application": lambda application, path=None, profile=None, **kw: windows.launch_application(
+            "open_application": lambda application, path=None, profile=None, force_new=False, **kw: windows.launch_application(
                 application,
                 arguments=[path] if path else None,
-                profile=profile
+                profile=profile,
+                force_new=bool(force_new),
             ),
             "open_application_and_inspect": lambda application, project_path=None, **kw: {
                 "success": windows.launch_application(application).get("success", False),
@@ -440,6 +441,13 @@ def build_default_tool_registry() -> ToolRegistry:
                 "string",
                 "Optional browser profile hint such as 'main', a Chrome profile name, directory, or signed-in account email",
                 required=False
+            ),
+            ToolParameter(
+                "force_new",
+                "boolean",
+                "Launch a new instance/window instead of reusing an existing one",
+                required=False,
+                default=False
             )
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
