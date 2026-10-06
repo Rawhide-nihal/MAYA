@@ -685,6 +685,7 @@
 
   M.start('whatsapp', handle);
 
-  reportVisibleSidebarContacts();
-  setInterval(reportVisibleSidebarContacts, 5000);
+  // Full contact/group synchronization is explicit. MAYA may still enrich a
+  // record when the user searches/opens that exact chat, but it does not crawl
+  // the sidebar continuously in the background.
 })();
