@@ -91,20 +91,31 @@ class CommunicationAgent:
             }
 
         submit_browser = getattr(self.bridge, "submit_browser_action", None)
-        browser_result = (
-            submit_browser({
+        bridge_status = getattr(self.bridge, "status", None)
+        recent = None
+        if callable(bridge_status):
+            try:
+                recent = bool((bridge_status() or {}).get("connected_recently"))
+            except Exception:
+                recent = None
+
+        if callable(submit_browser) and recent is not False:
+            browser_result = submit_browser({
                 "type": "focus_service",
                 "service": service_name,
                 "url": SERVICE_URLS[service_name],
                 "force_new": bool(force_new),
-            }, timeout=6.0)
-            if callable(submit_browser)
-            else {
+            }, timeout=2.8)
+        else:
+            browser_result = {
                 "success": False,
                 "verified": False,
-                "error": "Browser background action bridge is unavailable.",
+                "error": (
+                    "MAYA Browser Bridge is not responding recently."
+                    if recent is False
+                    else "Browser background action bridge is unavailable."
+                ),
             }
-        )
 
         if browser_result.get("success"):
             browser_result.setdefault("service", service_name)
