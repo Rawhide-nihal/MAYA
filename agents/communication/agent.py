@@ -7,13 +7,16 @@ extension running inside that profile.
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import time
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agents.communication.bridge import CommunicationBridge, communication_bridge
 from agents.windows.agent import WindowsAgent
-from maya_core.config import settings
+from maya_core.config import settings, MAYA_DATA_DIR
 
 
 SERVICE_URLS = {
@@ -46,6 +49,113 @@ class CommunicationAgent:
         }
         return aliases.get(value, value)
 
+    def open_service(
+        self,
+        service: str,
+        profile: Optional[str] = "main",
+        force_new: bool = False,
+    ) -> Dict[str, Any]:
+        """Focus an existing authenticated service tab, creating one only when needed."""
+        service_name = self._normalize_service(service)
+        if service_name not in SERVICE_URLS:
+            return {
+                "success": False,
+                "verified": False,
+                "error": "Service must be gmail, whatsapp, or telegram.",
+            }
+
+        browser_result = self.bridge.submit_browser_action({
+            "type": "focus_service",
+            "service": service_name,
+            "url": SERVICE_URLS[service_name],
+            "force_new": bool(force_new),
+        }, timeout=6.0)
+
+        if browser_result.get("success"):
+            browser_result.setdefault("service", service_name)
+            browser_result["profile"] = profile or "main"
+            return browser_result
+
+        # If the extension background is unavailable, use the configured Chrome
+        # profile as a fallback. Opening the URL requires a real launch dispatch.
+        fallback = self.windows.launch_application(
+            "Google Chrome",
+            arguments=[SERVICE_URLS[service_name]],
+            profile=profile or "main",
+            force_new=True,
+        )
+        fallback.setdefault("service", service_name)
+        fallback["browser_bridge_fallback"] = True
+        if not fallback.get("success"):
+            fallback.setdefault(
+                "error",
+                browser_result.get("error") or "Could not open the communication service."
+            )
+        return fallback
+
+    def read_messages(
+        self,
+        recipient: str,
+        limit: int = 1,
+        service: str = "whatsapp",
+        profile: Optional[str] = "main",
+    ) -> Dict[str, Any]:
+        service_name = self._normalize_service(service)
+        if service_name != "whatsapp":
+            return {
+                "success": False,
+                "verified": False,
+                "error": "Live message reading is currently implemented for WhatsApp Web.",
+            }
+
+        recipient_text = str(recipient or "").strip()
+        if not recipient_text:
+            return {"success": False, "verified": False, "error": "Recipient is required."}
+
+        current_chat = recipient_text.lower() in {"current chat", "current conversation"}
+        if not current_chat:
+            resolved = self.bridge.resolve_contact("whatsapp", recipient_text)
+            if resolved.get("matched") and resolved.get("record"):
+                recipient_text = str(resolved["record"].get("name") or recipient_text)
+            elif resolved.get("ambiguous"):
+                suggestions = [
+                    (item.get("name") if isinstance(item, dict) else str(item))
+                    for item in (resolved.get("suggestions") or [])
+                ]
+                return {
+                    "success": False,
+                    "verified": False,
+                    "error": (
+                        f"More than one WhatsApp record could match '{recipient_text}'. "
+                        + ("Possible matches: " + ", ".join([x for x in suggestions if x][:6]) if suggestions else "Use the exact name.")
+                    ),
+                    "suggestions": resolved.get("suggestions") or [],
+                }
+
+        opened = self.open_service("whatsapp", profile=profile, force_new=False)
+        if not opened.get("success"):
+            return {
+                "success": False,
+                "verified": False,
+                "error": opened.get("error", "Could not open WhatsApp Web."),
+                "open_result": opened,
+            }
+
+        result = self.bridge.submit({
+            "service": "whatsapp",
+            "action": "read_messages",
+            "recipient": recipient_text,
+            "message": "",
+            "subject": "",
+            "profile": profile or "main",
+            "attachment_path": None,
+            "target_tab_id": opened.get("tab_id"),
+            "limit": max(1, min(int(limit or 1), 20)),
+        }, timeout=25.0)
+        result.setdefault("service", "whatsapp")
+        result.setdefault("recipient", recipient_text)
+        return result
+
     def _execute(
         self,
         *,
@@ -73,17 +183,46 @@ class CommunicationAgent:
             return {"success": False, "verified": False, "error": "Message or attachment is required."}
 
         expanded_attachment = None
+        generated_archive = None
+        original_attachment = None
         if attachment_path:
-            expanded_attachment = str(Path(attachment_path).expanduser().resolve())
+            original_attachment = str(Path(attachment_path).expanduser().resolve())
+            expanded_attachment = original_attachment
+
+            if os.path.isdir(original_attachment):
+                outbox = MAYA_DATA_DIR / "communication_outbox"
+                outbox.mkdir(parents=True, exist_ok=True)
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original_attachment).name).strip("_") or "folder"
+                archive_base = outbox / f"{safe_name}_{int(time.time() * 1000)}"
+                try:
+                    generated_archive = shutil.make_archive(
+                        str(archive_base),
+                        "zip",
+                        root_dir=original_attachment,
+                    )
+                    expanded_attachment = generated_archive
+                except Exception as exc:
+                    return {
+                        "success": False,
+                        "verified": False,
+                        "error": f"Could not package folder for WhatsApp transfer: {exc}",
+                    }
+
             if not os.path.isfile(expanded_attachment):
                 return {
                     "success": False,
                     "verified": False,
-                    "error": f"Attachment does not exist or is not a file: {expanded_attachment}",
+                    "error": f"Attachment does not exist: {expanded_attachment}",
                 }
+
             max_mb = int(settings.get("communication_attachment_max_mb", 12))
             size_bytes = os.path.getsize(expanded_attachment)
             if size_bytes > max_mb * 1024 * 1024:
+                if generated_archive:
+                    try:
+                        os.remove(generated_archive)
+                    except OSError:
+                        pass
                 return {
                     "success": False,
                     "verified": False,
@@ -103,8 +242,9 @@ class CommunicationAgent:
                 recipient = str(resolved_contact["name"]).strip()
             elif resolved_contact.get("ambiguous"):
                 suggestions = [
-                    str(name) for name in (resolved_contact.get("suggestions") or [])
-                    if name
+                    (item.get("name") if isinstance(item, dict) else str(item))
+                    for item in (resolved_contact.get("suggestions") or [])
+                    if item
                 ]
                 return {
                     "success": False,
@@ -144,16 +284,21 @@ class CommunicationAgent:
                 "reused_active_tab": True,
             }
         else:
-            launch = self.windows.launch_application(
-                "Google Chrome",
-                arguments=[SERVICE_URLS[service_name]],
+            launch = self.open_service(
+                service_name,
                 profile=profile or "main",
+                force_new=False,
             )
             if not launch.get("success"):
+                if generated_archive:
+                    try:
+                        os.remove(generated_archive)
+                    except OSError:
+                        pass
                 return {
                     "success": False,
                     "verified": False,
-                    "error": launch.get("error", "Could not launch Chrome."),
+                    "error": launch.get("error", "Could not open communication service."),
                     "launch": launch,
                 }
 
@@ -170,7 +315,19 @@ class CommunicationAgent:
         result = self.bridge.submit(command, timeout=30.0)
         result.setdefault("service", service_name)
         result.setdefault("recipient", recipient)
-        result["chrome_profile"] = launch.get("profile_name") or launch.get("profile_directory")
+        result["chrome_profile"] = (
+            launch.get("profile_name")
+            or launch.get("profile_directory")
+            or launch.get("profile")
+        )
+        if generated_archive:
+            result["folder_packaged_as_zip"] = True
+            result["original_attachment_path"] = original_attachment
+            result["archive_name"] = os.path.basename(generated_archive)
+            try:
+                os.remove(generated_archive)
+            except OSError:
+                pass
         return result
 
     def lookup_contact(
@@ -198,6 +355,7 @@ class CommunicationAgent:
         indexed_count = len(self.bridge.list_contacts(service_name))
 
         if resolution.get("matched"):
+            record = dict(resolution.get("record") or {})
             return {
                 "success": True,
                 "verified": True,
@@ -205,6 +363,12 @@ class CommunicationAgent:
                 "service": service_name,
                 "query": query_text,
                 "name": resolution.get("name"),
+                "record": record,
+                "type": record.get("type"),
+                "phone": record.get("phone"),
+                "jid": record.get("jid"),
+                "chat_id": record.get("chat_id"),
+                "aliases": record.get("aliases") or [],
                 "resolution": resolution.get("resolution"),
                 "score": resolution.get("score"),
                 "indexed_count": indexed_count,
@@ -234,10 +398,10 @@ class CommunicationAgent:
                 "error": "Full contact sync is currently implemented for WhatsApp Web.",
             }
 
-        launch = self.windows.launch_application(
-            "Google Chrome",
-            arguments=[SERVICE_URLS[service_name]],
+        launch = self.open_service(
+            service_name,
             profile=profile or "main",
+            force_new=False,
         )
         if not launch.get("success"):
             return {
@@ -259,7 +423,10 @@ class CommunicationAgent:
         }, timeout=45.0)
         result.setdefault("service", service_name)
         result["chrome_profile"] = launch.get("profile_name") or launch.get("profile_directory")
-        result["local_contact_count"] = len(self.bridge.list_contacts(service_name))
+        local_records = self.bridge.list_contacts(service_name, limit=5000)
+        result["local_contact_count"] = len(local_records)
+        result["local_group_count"] = sum(1 for r in local_records if r.get("type") == "group")
+        result["local_typed_contact_count"] = sum(1 for r in local_records if r.get("type") == "contact")
         return result
 
     def prepare(
