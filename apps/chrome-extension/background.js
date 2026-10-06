@@ -63,7 +63,8 @@ async function reportActiveTabContext() {
         url: tab.url || '',
         tab_id: tab.id ?? null,
         window_id: tab.windowId ?? null,
-        tab_count: windowTabs?.length ?? null
+        tab_count: windowTabs?.length ?? null,
+        extension_version: chrome.runtime.getManifest().version
       })
     });
 
