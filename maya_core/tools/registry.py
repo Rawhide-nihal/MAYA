@@ -221,9 +221,20 @@ class ToolRegistry:
             "analyze_screen": lambda **kw: vision.analyze_screen(),
             "open_url": lambda url, **kw: browser.open_url(url),
             "search_web": lambda query, **kw: browser.search_web(query),
-            "lookup_communication_contact": lambda service="whatsapp", query="", **kw: communication.lookup_contact(
+            "lookup_communication_contact": lambda service="whatsapp", query="", detail=None, record_type=None, **kw: communication.lookup_contact(
                 service=service,
                 query=query
+            ),
+            "read_communication_messages": lambda service="whatsapp", recipient="", limit=1, profile="main", **kw: communication.read_messages(
+                recipient=recipient,
+                limit=limit,
+                service=service,
+                profile=profile
+            ),
+            "open_communication_service": lambda service="whatsapp", profile="main", force_new=False, **kw: communication.open_service(
+                service=service,
+                profile=profile,
+                force_new=bool(force_new)
             ),
             "sync_communication_contacts": lambda service="whatsapp", profile="main", **kw: communication.sync_contacts(
                 service=service,
@@ -373,11 +384,27 @@ def build_default_tool_registry() -> ToolRegistry:
 
     registry.register(ToolSchema(
         name="lookup_communication_contact",
-        description="Looks up a name in MAYA's private local WhatsApp/Telegram contact index without sending anything.",
+        description="Looks up a person/group and locally stored details in MAYA's private WhatsApp/Telegram index without sending anything.",
         category="communication",
         parameters=[
             ToolParameter("service", "string", "Communication service, normally whatsapp", required=False, default="whatsapp"),
-            ToolParameter("query", "string", "Contact/chat name to look up", required=True)
+            ToolParameter("query", "string", "Contact or group name/number to look up", required=True),
+            ToolParameter("detail", "string", "Optional requested detail such as phone, jid, type, or all", required=False),
+            ToolParameter("record_type", "string", "Optional filter: contact or group", required=False)
+        ],
+        permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="read_communication_messages",
+        description="Reads the latest visible messages live from a specified authenticated WhatsApp conversation without sending anything.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "Communication service; currently whatsapp", required=False, default="whatsapp"),
+            ToolParameter("recipient", "string", "Exact synced contact/group name or 'current chat'", required=True),
+            ToolParameter("limit", "integer", "Number of latest visible messages to read (1-20)", required=False, default=1),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main")
         ],
         permission_level=PermissionLevel.LEVEL_1_OBSERVATION,
         undo_available=False
@@ -412,6 +439,19 @@ def build_default_tool_registry() -> ToolRegistry:
         category="filesystem",
         parameters=[
             ToolParameter("filepath", "string", "File path or recent-file reference", required=True)
+        ],
+        permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
+        undo_available=False
+    ))
+
+    registry.register(ToolSchema(
+        name="open_communication_service",
+        description="Focuses an existing authenticated Gmail/WhatsApp/Telegram browser tab, creating a new tab only when needed or explicitly requested.",
+        category="communication",
+        parameters=[
+            ToolParameter("service", "string", "gmail, whatsapp, or telegram", required=True),
+            ToolParameter("profile", "string", "Chrome profile hint", required=False, default="main"),
+            ToolParameter("force_new", "boolean", "Force creation of a new service tab", required=False, default=False)
         ],
         permission_level=PermissionLevel.LEVEL_2_SAFE_ACTION,
         undo_available=False
