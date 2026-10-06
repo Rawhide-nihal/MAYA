@@ -29,6 +29,54 @@
     return name;
   }
 
+  function contactCandidateElements(root = document) {
+    const selectors = [
+      '[role="listitem"]',
+      '[data-testid*="cell-frame"]',
+      'div[tabindex="-1"]',
+      '[title]',
+      '[aria-label]',
+      'span[dir="auto"]'
+    ].join(', ');
+
+    return Array.from(root.querySelectorAll(selectors))
+      .filter(M.visible);
+  }
+
+  function displayNameFromElement(element, row) {
+    const candidates = [];
+    const push = value => {
+      if (value == null) return;
+      const text = String(value).trim();
+      if (text) candidates.push(text);
+    };
+
+    push(element?.getAttribute?.('title'));
+    push(element?.getAttribute?.('aria-label'));
+    push(row?.getAttribute?.('title'));
+    push(row?.getAttribute?.('aria-label'));
+
+    const titled = row?.querySelector?.('[title]');
+    if (titled) push(titled.getAttribute('title'));
+
+    const auto = row?.querySelector?.('span[dir="auto"]');
+    if (auto) push(auto.textContent);
+
+    const labelled = row?.querySelector?.('[aria-label]');
+    if (labelled) push(labelled.getAttribute('aria-label'));
+
+    const rowText = String(row?.innerText || row?.textContent || '');
+    for (const line of rowText.split(/\r?\n/).slice(0, 4)) {
+      push(line);
+    }
+
+    for (const value of candidates) {
+      const clean = cleanContactName(value);
+      if (clean) return clean;
+    }
+    return null;
+  }
+
   function extractJid(value) {
     const text = String(value || '');
     const match = text.match(/([0-9A-Za-z._:-]+@(?:g\.us|c\.us|s\.whatsapp\.net|lid))/i);
@@ -42,12 +90,13 @@
 
   function contactRecordFromElement(element) {
     if (!element) return null;
-    const name = cleanContactName(element.getAttribute?.('title') || element.textContent);
-    if (!name) return null;
 
     const row = element.closest?.(
-      '[role="listitem"], [role="button"], div[tabindex="-1"], [data-testid*="cell-frame"]'
+      '[role="listitem"], [data-testid*="cell-frame"], div[tabindex="-1"], [role="button"]'
     ) || element.parentElement || element;
+
+    const name = displayNameFromElement(element, row);
+    if (!name) return null;
 
     const identityValues = [];
     const pushAttrs = (node) => {
@@ -121,8 +170,15 @@
 
   function collectVisibleContactRecords(root = document) {
     const records = new Map();
-    const titled = Array.from(root.querySelectorAll('[title]')).filter(M.visible);
-    for (const element of titled) {
+    const seenRows = new Set();
+
+    for (const element of contactCandidateElements(root)) {
+      const row = element.closest?.(
+        '[role="listitem"], [data-testid*="cell-frame"], div[tabindex="-1"], [role="button"]'
+      ) || element;
+      if (seenRows.has(row)) continue;
+      seenRows.add(row);
+
       const record = contactRecordFromElement(element);
       if (record) mergeRecordMap(records, [record]);
     }
@@ -183,11 +239,25 @@
     const candidates = Array.from(document.querySelectorAll('div'))
       .filter(M.visible)
       .filter(el => el.scrollHeight > el.clientHeight + 120)
-      .filter(el => el.querySelectorAll('[title]').length >= 2);
+      .filter(el => (
+        el.querySelectorAll('[title]').length +
+        el.querySelectorAll('span[dir="auto"]').length +
+        el.querySelectorAll('[role="listitem"]').length
+      ) >= 2);
 
     candidates.sort((a, b) => {
-      const aScore = a.querySelectorAll('[title]').length + (a.scrollHeight - a.clientHeight) / 100;
-      const bScore = b.querySelectorAll('[title]').length + (b.scrollHeight - b.clientHeight) / 100;
+      const aScore = (
+        a.querySelectorAll('[title]').length +
+        a.querySelectorAll('span[dir="auto"]').length +
+        a.querySelectorAll('[role="listitem"]').length +
+        (a.scrollHeight - a.clientHeight) / 100
+      );
+      const bScore = (
+        b.querySelectorAll('[title]').length +
+        b.querySelectorAll('span[dir="auto"]').length +
+        b.querySelectorAll('[role="listitem"]').length +
+        (b.scrollHeight - b.clientHeight) / 100
+      );
       return bScore - aScore;
     });
     return candidates[0] || null;
@@ -554,14 +624,12 @@
 
     await M.sleep(1100);
     const resultPane = document.querySelector('#pane-side') || document;
-    const allTitled = Array.from(resultPane.querySelectorAll('[title]'))
-      .filter(M.visible)
-      .filter(el => cleanContactName(el.getAttribute('title')));
+    const searchElements = contactCandidateElements(resultPane);
 
     const candidates = [];
     const seenRows = new Set();
 
-    for (const el of allTitled) {
+    for (const el of searchElements) {
       const row = el.closest('[role="listitem"], [role="button"], div[tabindex="-1"]') || el;
       if (seenRows.has(row)) continue;
       seenRows.add(row);
